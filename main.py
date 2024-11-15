@@ -2,7 +2,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CallbackContext
 
 # Список ключевых слов или шаблонов, по которым будет фильтроваться спам
-SPAM_KEYWORDS = ["спам", "реклама", "порно", "секс"]
+SPAM_KEYWORDS = ["спам", "реклама", "порно", "секс", "заработок"]
 
 async def handle_message(update: Update, context: CallbackContext):
     message_text = update.message.text.lower()  # Приведение текста к нижнему регистру
