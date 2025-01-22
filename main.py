@@ -10,19 +10,25 @@ logger = logging.getLogger(__name__)
 # Список ключевых слов для фильтрации спама
 SPAM_KEYWORDS = ["спам", "реклама", "порно", "секс", "заработок"]
 
-async def handle_message(update: Update, context: CallbackContext):
-    """Обрабатывает входящие сообщения и удаляет спам."""
-    message_text = update.message.text.lower()
-    if any(keyword in message_text for keyword in SPAM_KEYWORDS):
-        try:
-            await update.message.delete()
-            logger.info(f"Удалено сообщение от {update.message.from_user.full_name}: {update.message.text}")
-        except BadRequest as e:
-            logger.error(f"Не удалось удалить сообщение: {e}")
-        except Exception as e:
-            logger.error(f"Ошибка при обработке сообщения: {e}")
+# Список разрешённых пользователей (username)
+ALLOWED_USERS = ["khristo_01"]  # Замените на реальные usernames
 
-# Команда для добавления новых ключевых слов
+def is_user_allowed(username):
+    """Проверяет, есть ли пользователь в списке разрешённых."""
+    return username in ALLOWED_USERS
+
+# Проверка доступа к командам
+def check_access(func):
+    """Декоратор для проверки доступа к команде."""
+    async def wrapper(update: Update, context: CallbackContext):
+        username = update.message.from_user.username
+        if not username or not is_user_allowed(username):
+            await update.message.reply_text("У вас нет прав на выполнение этой команды.")
+            return
+        await func(update, context)
+    return wrapper
+
+@check_access
 async def add_keyword(update: Update, context: CallbackContext):
     """Добавляет новые ключевые слова в список фильтрации."""
     new_keywords = [kw.lower() for kw in context.args]
@@ -38,7 +44,7 @@ async def add_keyword(update: Update, context: CallbackContext):
     else:
         await update.message.reply_text("Все указанные ключевые слова уже существуют.")
 
-# Команда для удаления ключевых слов
+@check_access
 async def remove_keyword(update: Update, context: CallbackContext):
     """Удаляет ключевые слова из списка фильтрации."""
     remove_keywords = [kw.lower() for kw in context.args]
@@ -54,20 +60,29 @@ async def remove_keyword(update: Update, context: CallbackContext):
     else:
         await update.message.reply_text("Указанные ключевые слова не найдены в списке.")
 
-# Команда для просмотра текущих ключевых слов
+@check_access
 async def list_keywords(update: Update, context: CallbackContext):
     """Показывает список текущих ключевых слов."""
     await update.message.reply_text(f"Текущие ключевые слова: {', '.join(SPAM_KEYWORDS)}")
 
-# Основная функция запуска бота
+@check_access
+async def list_commands(update: Update, context: CallbackContext):
+    """Показывает список доступных команд пользователю."""
+    await update.message.reply_text(
+        "Доступные команды:\n"
+        "/add <слово> - Добавить ключевое слово\n"
+        "/remove <слово> - Удалить ключевое слово\n"
+        "/list - Показать список ключевых слов"
+    )
+
 def main():
     application = Application.builder().token("7706488866:AAH5rPfgUA0zDY_D3wqbcHc7DAxAfLgxQDE").build()
 
     # Обработчики сообщений и команд
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CommandHandler("add", add_keyword))
     application.add_handler(CommandHandler("remove", remove_keyword))
     application.add_handler(CommandHandler("list", list_keywords))
+    application.add_handler(CommandHandler("commands", list_commands))  # Команда для списка доступных команд
 
     application.run_polling()
 
