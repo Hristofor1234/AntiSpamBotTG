@@ -43,6 +43,7 @@ def check_access(func):
         await func(update, context)
     return wrapper
 
+# Команды для управления ключевыми словами
 @check_access
 async def add_keyword(update: Update, context: CallbackContext):
     new_keywords = [kw.lower() for kw in context.args]
@@ -88,14 +89,31 @@ async def list_commands(update: Update, context: CallbackContext):
         "/list - Показать список ключевых слов"
     )
 
+# Удаление сообщений с ключевыми словами
+async def filter_spam(update: Update, context: CallbackContext):
+    message_text = update.message.text.lower()
+    for keyword in SPAM_KEYWORDS:
+        if keyword in message_text:
+            try:
+                await update.message.delete()
+                logger.info(f"Сообщение удалено: {message_text}")
+                return
+            except BadRequest as e:
+                logger.error(f"Ошибка при удалении сообщения: {e}")
+                return
+
 def main():
     load_keywords()
     application = Application.builder().token("7706488866:AAH5rPfgUA0zDY_D3wqbcHc7DAxAfLgxQDE").build()
 
+    # Обработчики команд
     application.add_handler(CommandHandler("add", add_keyword))
     application.add_handler(CommandHandler("remove", remove_keyword))
     application.add_handler(CommandHandler("list", list_keywords))
     application.add_handler(CommandHandler("commands", list_commands))
+
+    # Обработчик сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_spam))
 
     application.run_polling()
     save_keywords()
