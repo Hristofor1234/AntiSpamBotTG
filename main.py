@@ -3,6 +3,11 @@ from telegram.ext import Application, MessageHandler, filters, CallbackContext, 
 from telegram.error import BadRequest
 import logging
 import json
+import os
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения из файла .env
+load_dotenv()
 
 # Логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -103,8 +108,16 @@ async def filter_spam(update: Update, context: CallbackContext):
                 return
 
 def main():
+    # Загрузка ключевых слов
     load_keywords()
-    application = Application.builder().token("7706488866:AAH5rPfgUA0zDY_D3wqbcHc7DAxAfLgxQDE").build()
+
+    # Получение токена из переменной окружения
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logger.error("Токен не найден в переменных окружения!")
+        return
+
+    application = Application.builder().token(token).build()
 
     # Обработчики команд
     application.add_handler(CommandHandler("add", add_keyword))
@@ -115,7 +128,10 @@ def main():
     # Обработчик сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_spam))
 
+    # Запуск бота
     application.run_polling()
+
+    # Сохранение ключевых слов
     save_keywords()
 
 if __name__ == '__main__':
