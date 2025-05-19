@@ -24,16 +24,20 @@ ALLOWED_USERS = ["khristo_01"]
 
 # Загрузка и сохранение ключевых слов
 def save_keywords():
-    with open(KEYWORDS_FILE, "w") as file:
-        json.dump(SPAM_KEYWORDS, file)
+    with open(KEYWORDS_FILE, "w", encoding="utf-8") as file:
+        json.dump(SPAM_KEYWORDS, file, ensure_ascii=False, indent=4)
+
 
 def load_keywords():
     global SPAM_KEYWORDS
     try:
-        with open(KEYWORDS_FILE, "r") as file:
+        with open(KEYWORDS_FILE, "r", encoding="utf-8") as file:
             SPAM_KEYWORDS = json.load(file)
+        logger.info(f"Загружены ключевые слова: {SPAM_KEYWORDS}")
     except FileNotFoundError:
         SPAM_KEYWORDS = []
+        logger.warning("Файл keywords.json не найден. Начинаем с пустого списка.")
+
 
 # Проверка доступа к командам
 def is_user_allowed(username):
@@ -131,8 +135,7 @@ def main():
     # Запуск бота
     application.run_polling()
 
-    # Сохранение ключевых слов
-    save_keywords()
+
 
 if __name__ == '__main__':
     main()
