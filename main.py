@@ -2,33 +2,40 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CallbackContext, CommandHandler
 from telegram.error import BadRequest
 import logging
+import json
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
+# Загрузка переменных окружения из файла .env
 load_dotenv()
 
 # Логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Список разрешённых пользователей
+# Файл для хранения ключевых слов
+KEYWORDS_FILE = "keywords.json"
+
+# Список ключевых слов для фильтрации спама
+SPAM_KEYWORDS = []
+
+# Список разрешённых пользователей (username)
 ALLOWED_USERS = ["khristo_01"]
 
-# Получение подключения к базе данных PostgreSQL
-def get_db_connection():
-    return psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
-        cursor_factory=RealDictCursor
-    )
+# Загрузка и сохранение ключевых слов
+def save_keywords():
+    with open(KEYWORDS_FILE, "w") as file:
+        json.dump(SPAM_KEYWORDS, file)
 
-# Проверка доступа
+def load_keywords():
+    global SPAM_KEYWORDS
+    try:
+        with open(KEYWORDS_FILE, "r") as file:
+            SPAM_KEYWORDS = json.load(file)
+    except FileNotFoundError:
+        SPAM_KEYWORDS = []
+
+# Проверка доступа к командам
 def is_user_allowed(username):
     return username in ALLOWED_USERS
 
@@ -41,23 +48,19 @@ def check_access(func):
         await func(update, context)
     return wrapper
 
-# Команды управления ключевыми словами
+# Команды для управления ключевыми словами
 @check_access
 async def add_keyword(update: Update, context: CallbackContext):
     new_keywords = [kw.lower() for kw in context.args]
     added_keywords = []
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            for keyword in new_keywords:
-                try:
-                    cur.execute("INSERT INTO spam_keywords (keyword) VALUES (%s) ON CONFLICT DO NOTHING", (keyword,))
-                    if cur.rowcount:
-                        added_keywords.append(keyword)
-                except Exception as e:
-                    logger.error(f"Ошибка добавления слова '{keyword}': {e}")
+    for keyword in new_keywords:
+        if keyword not in SPAM_KEYWORDS:
+            SPAM_KEYWORDS.append(keyword)
+            added_keywords.append(keyword)
 
     if added_keywords:
+        save_keywords()
         await update.message.reply_text(f"Ключевые слова добавлены: {', '.join(added_keywords)}")
     else:
         await update.message.reply_text("Все указанные ключевые слова уже существуют.")
@@ -67,30 +70,20 @@ async def remove_keyword(update: Update, context: CallbackContext):
     remove_keywords = [kw.lower() for kw in context.args]
     removed_keywords = []
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            for keyword in remove_keywords:
-                cur.execute("DELETE FROM spam_keywords WHERE keyword = %s", (keyword,))
-                if cur.rowcount:
-                    removed_keywords.append(keyword)
+    for keyword in remove_keywords:
+        if keyword in SPAM_KEYWORDS:
+            SPAM_KEYWORDS.remove(keyword)
+            removed_keywords.append(keyword)
 
     if removed_keywords:
+        save_keywords()
         await update.message.reply_text(f"Ключевые слова удалены: {', '.join(removed_keywords)}")
     else:
         await update.message.reply_text("Указанные ключевые слова не найдены в списке.")
 
 @check_access
 async def list_keywords(update: Update, context: CallbackContext):
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT keyword FROM spam_keywords")
-            rows = cur.fetchall()
-            keywords = [row['keyword'] for row in rows]
-
-    if keywords:
-        await update.message.reply_text("Текущие ключевые слова:\n" + "\n".join(keywords))
-    else:
-        await update.message.reply_text("Список ключевых слов пуст.")
+    await update.message.reply_text(f"Текущие ключевые слова: {', '.join(SPAM_KEYWORDS)}")
 
 @check_access
 async def list_commands(update: Update, context: CallbackContext):
@@ -101,29 +94,27 @@ async def list_commands(update: Update, context: CallbackContext):
         "/list - Показать список ключевых слов"
     )
 
-# Фильтрация спама
+# Удаление сообщений с ключевыми словами
 async def filter_spam(update: Update, context: CallbackContext):
     message_text = update.message.text.lower()
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT keyword FROM spam_keywords")
-            rows = cur.fetchall()
-            for row in rows:
-                if row["keyword"] in message_text:
-                    try:
-                        await update.message.delete()
-                        logger.info(f"Удалено сообщение: {message_text}")
-                        return
-                    except BadRequest as e:
-                        logger.error(f"Ошибка при удалении: {e}")
-                        return
+    for keyword in SPAM_KEYWORDS:
+        if keyword in message_text:
+            try:
+                await update.message.delete()
+                logger.info(f"Сообщение удалено: {message_text}")
+                return
+            except BadRequest as e:
+                logger.error(f"Ошибка при удалении сообщения: {e}")
+                return
 
 def main():
+    # Загрузка ключевых слов
+    load_keywords()
+
     # Получение токена из переменной окружения
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logger.error("TELEGRAM_BOT_TOKEN не найден в .env!")
+        logger.error("Токен не найден в переменных окружения!")
         return
 
     application = Application.builder().token(token).build()
@@ -139,6 +130,9 @@ def main():
 
     # Запуск бота
     application.run_polling()
+
+    # Сохранение ключевых слов
+    save_keywords()
 
 if __name__ == '__main__':
     main()
