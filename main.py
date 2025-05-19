@@ -134,5 +134,7 @@ def main():
     # Сохранение ключевых слов
     save_keywords()
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+
