@@ -1,26 +1,22 @@
 from telegram import Update, BotCommand
-from telegram.ext import Application, MessageHandler, filters, CallbackContext, CommandHandler
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackContext
 from telegram.error import BadRequest
 import logging
 import json
 import os
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
+# Загрузка .env переменных
 load_dotenv()
 
 # Логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Файл для хранения ключевых слов
+# Константы
 KEYWORDS_FILE = "keywords.json"
-
-# Список ключевых слов
 SPAM_KEYWORDS = []
-
-# Разрешённые пользователи
-ALLOWED_USERS = ["khristo_01"]
+ALLOWED_USERS = ["khristo_01"]  # укажи нужных пользователей
 
 # === Работа с ключевыми словами ===
 def save_keywords():
@@ -61,9 +57,9 @@ async def add_keyword(update: Update, context: CallbackContext):
 
     if added_keywords:
         save_keywords()
-        await update.message.reply_text(f"Ключевые слова добавлены: {', '.join(added_keywords)}")
+        await update.message.reply_text(f"Добавлены: {', '.join(added_keywords)}")
     else:
-        await update.message.reply_text("Все указанные ключевые слова уже существуют.")
+        await update.message.reply_text("Все слова уже в списке.")
 
 @check_access
 async def remove_keyword(update: Update, context: CallbackContext):
@@ -77,14 +73,14 @@ async def remove_keyword(update: Update, context: CallbackContext):
 
     if removed_keywords:
         save_keywords()
-        await update.message.reply_text(f"Ключевые слова удалены: {', '.join(removed_keywords)}")
+        await update.message.reply_text(f"Удалены: {', '.join(removed_keywords)}")
     else:
-        await update.message.reply_text("Указанные ключевые слова не найдены в списке.")
+        await update.message.reply_text("Слова не найдены в списке.")
 
 @check_access
 async def list_keywords(update: Update, context: CallbackContext):
     if SPAM_KEYWORDS:
-        await update.message.reply_text("Текущие ключевые слова:\n" + ", ".join(SPAM_KEYWORDS))
+        await update.message.reply_text("Ключевые слова:\n" + ", ".join(SPAM_KEYWORDS))
     else:
         await update.message.reply_text("Список ключевых слов пуст.")
 
@@ -94,11 +90,11 @@ async def list_commands(update: Update, context: CallbackContext):
         "Доступные команды:\n"
         "/add <слово> - Добавить ключевое слово\n"
         "/remove <слово> - Удалить ключевое слово\n"
-        "/list - Показать список ключевых слов\n"
+        "/list - Показать список\n"
         "/commands - Показать это сообщение"
     )
 
-# === Фильтрация ===
+# === Фильтрация спама ===
 async def filter_spam(update: Update, context: CallbackContext):
     message_text = update.message.text.lower()
     for keyword in SPAM_KEYWORDS:
@@ -108,19 +104,19 @@ async def filter_spam(update: Update, context: CallbackContext):
                 logger.info(f"Удалено сообщение: {message_text}")
                 return
             except BadRequest as e:
-                logger.error(f"Ошибка при удалении: {e}")
+                logger.error(f"Ошибка удаления: {e}")
                 return
 
-# === Установка команд для Telegram UI ===
-async def set_commands(application):
+# === Установка команд в Telegram UI ===
+async def setup_bot(application):
     await application.bot.set_my_commands([
         BotCommand("add", "Добавить ключевое слово"),
         BotCommand("remove", "Удалить ключевое слово"),
-        BotCommand("list", "Показать список ключевых слов"),
-        BotCommand("commands", "Показать команды")
+        BotCommand("list", "Показать список"),
+        BotCommand("commands", "Показать доступные команды")
     ])
 
-# === Точка входа ===
+# === Главная точка входа ===
 def main():
     load_keywords()
 
@@ -131,23 +127,18 @@ def main():
 
     application = Application.builder().token(token).build()
 
-    # Регистрация команд
+    # Обработчики
     application.add_handler(CommandHandler("add", add_keyword))
     application.add_handler(CommandHandler("remove", remove_keyword))
     application.add_handler(CommandHandler("list", list_keywords))
     application.add_handler(CommandHandler("commands", list_commands))
-
-    # Фильтр сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_spam))
 
-    # Установка команд и запуск бота
-    async def start_bot():
-        await set_commands(application)
-        await application.run_polling()
+    # Установка команд
+    application.post_init = setup_bot
 
-    import asyncio
-    asyncio.run(start_bot())
+    # Запуск
+    application.run_polling()
 
-# === Запуск ===
 if __name__ == "__main__":
     main()
