@@ -1,35 +1,53 @@
-from telegram import Update, BotCommand
-from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackContext
-from telegram.error import BadRequest
-import logging
-import json
 import os
+import logging
+import psycopg2
 from dotenv import load_dotenv
+from telegram import Update, BotCommand
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackContext, filters
+from telegram.error import BadRequest
 
-# Загрузка .env переменных
+# === Настройки ===
 load_dotenv()
-
-# Логирование
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Константы
-KEYWORDS_FILE = "keywords.json"
-SPAM_KEYWORDS = []
-ALLOWED_USERS = ["khristo_01"]  # укажи нужных пользователей
+ALLOWED_USERS = ["khristo_01"]
 
-# === Работа с ключевыми словами ===
-def save_keywords():
-    with open(KEYWORDS_FILE, "w", encoding="utf-8") as file:
-        json.dump(SPAM_KEYWORDS, file, ensure_ascii=False, indent=4)
+# === Подключение к PostgreSQL ===
+def get_conn():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
 
-def load_keywords():
-    global SPAM_KEYWORDS
-    try:
-        with open(KEYWORDS_FILE, "r", encoding="utf-8") as file:
-            SPAM_KEYWORDS = json.load(file)
-    except FileNotFoundError:
-        SPAM_KEYWORDS = []
+# === Работа с БД ===
+def init_db():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS spam_keywords (
+                id SERIAL PRIMARY KEY,
+                keyword TEXT UNIQUE NOT NULL
+            );
+        """)
+        conn.commit()
+
+def add_to_db(keyword):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO spam_keywords (keyword) VALUES (%s) ON CONFLICT DO NOTHING", (keyword,))
+        conn.commit()
+
+def remove_from_db(keyword):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM spam_keywords WHERE keyword = %s", (keyword,))
+        conn.commit()
+
+def get_all_keywords():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT keyword FROM spam_keywords")
+        return [row[0] for row in cur.fetchall()]
 
 # === Проверка доступа ===
 def is_user_allowed(username):
@@ -39,7 +57,7 @@ def check_access(func):
     async def wrapper(update: Update, context: CallbackContext):
         username = update.message.from_user.username
         if not username or not is_user_allowed(username):
-            await update.message.reply_text("У вас нет прав на выполнение этой команды.")
+            await update.message.reply_text("У вас нет доступа.")
             return
         await func(update, context)
     return wrapper
@@ -47,98 +65,82 @@ def check_access(func):
 # === Команды ===
 @check_access
 async def add_keyword(update: Update, context: CallbackContext):
-    new_keywords = [kw.lower() for kw in context.args]
-    added_keywords = []
-
-    for keyword in new_keywords:
-        if keyword not in SPAM_KEYWORDS:
-            SPAM_KEYWORDS.append(keyword)
-            added_keywords.append(keyword)
-
-    if added_keywords:
-        save_keywords()
-        await update.message.reply_text(f"Добавлены: {', '.join(added_keywords)}")
+    added = []
+    for kw in [w.lower() for w in context.args]:
+        add_to_db(kw)
+        added.append(kw)
+    if added:
+        await update.message.reply_text(f"Добавлены: {', '.join(added)}")
     else:
-        await update.message.reply_text("Все слова уже в списке.")
+        await update.message.reply_text("Нечего добавлять.")
 
 @check_access
 async def remove_keyword(update: Update, context: CallbackContext):
-    remove_keywords = [kw.lower() for kw in context.args]
-    removed_keywords = []
-
-    for keyword in remove_keywords:
-        if keyword in SPAM_KEYWORDS:
-            SPAM_KEYWORDS.remove(keyword)
-            removed_keywords.append(keyword)
-
-    if removed_keywords:
-        save_keywords()
-        await update.message.reply_text(f"Удалены: {', '.join(removed_keywords)}")
+    removed = []
+    for kw in [w.lower() for w in context.args]:
+        remove_from_db(kw)
+        removed.append(kw)
+    if removed:
+        await update.message.reply_text(f"Удалены: {', '.join(removed)}")
     else:
-        await update.message.reply_text("Слова не найдены в списке.")
+        await update.message.reply_text("Нечего удалять.")
 
 @check_access
 async def list_keywords(update: Update, context: CallbackContext):
-    if SPAM_KEYWORDS:
-        await update.message.reply_text("Ключевые слова:\n" + ", ".join(SPAM_KEYWORDS))
+    keywords = get_all_keywords()
+    if keywords:
+        await update.message.reply_text("Слова:\n" + ", ".join(keywords))
     else:
-        await update.message.reply_text("Список ключевых слов пуст.")
+        await update.message.reply_text("Список пуст.")
 
 @check_access
 async def list_commands(update: Update, context: CallbackContext):
     await update.message.reply_text(
-        "Доступные команды:\n"
-        "/add <слово> - Добавить ключевое слово\n"
-        "/remove <слово> - Удалить ключевое слово\n"
-        "/list - Показать список\n"
-        "/commands - Показать это сообщение"
+        "/add <слова> — добавить\n"
+        "/remove <слова> — удалить\n"
+        "/list — показать список\n"
+        "/commands — команды"
     )
 
-# === Фильтрация спама ===
+# === Фильтр ===
 async def filter_spam(update: Update, context: CallbackContext):
-    message_text = update.message.text.lower()
-    for keyword in SPAM_KEYWORDS:
-        if keyword in message_text:
+    text = update.message.text.lower()
+    for word in get_all_keywords():
+        if word in text:
             try:
                 await update.message.delete()
-                logger.info(f"Удалено сообщение: {message_text}")
-                return
-            except BadRequest as e:
-                logger.error(f"Ошибка удаления: {e}")
-                return
+                logger.info(f"Удалено сообщение: {text}")
+            except BadRequest:
+                logger.warning("Нельзя удалить сообщение")
+            break
 
-# === Установка команд в Telegram UI ===
-async def setup_bot(application):
-    await application.bot.set_my_commands([
+# === Telegram команды ===
+async def setup_commands(app):
+    await app.bot.set_my_commands([
         BotCommand("add", "Добавить ключевое слово"),
         BotCommand("remove", "Удалить ключевое слово"),
         BotCommand("list", "Показать список"),
-        BotCommand("commands", "Показать доступные команды")
+        BotCommand("commands", "Показать все команды")
     ])
 
 # === Главная точка входа ===
 def main():
-    load_keywords()
+    init_db()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logger.error("Не найден TELEGRAM_BOT_TOKEN в .env!")
-        return
+        raise Exception("TELEGRAM_BOT_TOKEN не указан")
 
-    application = Application.builder().token(token).build()
+    app = Application.builder().token(token).build()
 
-    # Обработчики
-    application.add_handler(CommandHandler("add", add_keyword))
-    application.add_handler(CommandHandler("remove", remove_keyword))
-    application.add_handler(CommandHandler("list", list_keywords))
-    application.add_handler(CommandHandler("commands", list_commands))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_spam))
+    app.add_handler(CommandHandler("add", add_keyword))
+    app.add_handler(CommandHandler("remove", remove_keyword))
+    app.add_handler(CommandHandler("list", list_keywords))
+    app.add_handler(CommandHandler("commands", list_commands))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_spam))
 
-    # Установка команд
-    application.post_init = setup_bot
-
-    # Запуск
-    application.run_polling()
+    app.post_init = setup_commands
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
