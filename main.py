@@ -124,12 +124,15 @@ async def setup_commands(app):
     ])
 
 # === Главная точка входа ===
-def main():
+async def main():
     init_db()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise Exception("TELEGRAM_BOT_TOKEN не указан")
+    webhook_url = os.getenv("WEBHOOK_URL")  # Пример: https://your-app.up.railway.app/webhook
+    port = int(os.getenv("PORT", "8080"))
+
+    if not token or not webhook_url:
+        raise Exception("TELEGRAM_BOT_TOKEN или WEBHOOK_URL не указаны в .env")
 
     app = Application.builder().token(token).build()
 
@@ -139,8 +142,19 @@ def main():
     app.add_handler(CommandHandler("commands", list_commands))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_spam))
 
-    app.post_init = setup_commands
-    app.run_polling()
+    async def post_init(app):
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        await app.bot.set_webhook(url=webhook_url)
+        await setup_commands(app)
+
+    app.post_init = post_init
+
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        webhook_path="/webhook",
+    )
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
