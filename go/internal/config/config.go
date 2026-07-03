@@ -4,109 +4,87 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config хранит всю конфигурацию приложения, загруженную из окружения.
 type Config struct {
 	BotToken string
 
-	DBHost     string
-	DBPort     string
-	DBUser     string
-	DBPassword string
-	DBName     string
+	// Антифлуд: не более RateLimitCount сообщений за RateLimitWindow.
+	RateLimitCount  int
+	RateLimitWindow time.Duration
 
-	allowedUsers map[string]struct{}
+	// Пул воркеров, обрабатывающих очередь обновлений.
+	WorkerCount int
+	QueueSize   int
 }
 
 // Getenv — минимальный интерфейс над os.Getenv, чтобы Load был тестируемым.
 type Getenv func(key string) string
 
-// Load читает конфигурацию из переданной функции получения переменных окружения
-// (обычно os.Getenv) и проверяет, что все обязательные значения заданы.
+// Load читает конфигурацию из переданной функции получения переменных
+// окружения (обычно os.Getenv) и проверяет обязательные значения.
 func Load(getenv Getenv) (*Config, error) {
-	cfg := &Config{
-		BotToken:   strings.TrimSpace(getenv("BOT_TOKEN")),
-		DBHost:     strings.TrimSpace(getenv("DB_HOST")),
-		DBPort:     strings.TrimSpace(getenv("DB_PORT")),
-		DBUser:     strings.TrimSpace(getenv("DB_USER")),
-		DBPassword: getenv("DB_PASSWORD"),
-		DBName:     strings.TrimSpace(getenv("DB_NAME")),
+	token := strings.TrimSpace(getenv("BOT_TOKEN"))
+	if token == "" {
+		return nil, fmt.Errorf("не задана обязательная переменная окружения: BOT_TOKEN")
 	}
 
-	if cfg.DBPort == "" {
-		cfg.DBPort = "5432"
+	rateLimitCount, err := intEnv(getenv, "RATE_LIMIT_COUNT", 5)
+	if err != nil {
+		return nil, err
+	}
+	if rateLimitCount <= 0 {
+		return nil, fmt.Errorf("RATE_LIMIT_COUNT должен быть положительным числом, получено %d", rateLimitCount)
 	}
 
-	var missing []string
-	if cfg.BotToken == "" {
-		missing = append(missing, "BOT_TOKEN")
+	rateLimitWindowSec, err := intEnv(getenv, "RATE_LIMIT_WINDOW_SECONDS", 3)
+	if err != nil {
+		return nil, err
 	}
-	if cfg.DBHost == "" {
-		missing = append(missing, "DB_HOST")
-	}
-	if cfg.DBUser == "" {
-		missing = append(missing, "DB_USER")
-	}
-	if cfg.DBPassword == "" {
-		missing = append(missing, "DB_PASSWORD")
-	}
-	if cfg.DBName == "" {
-		missing = append(missing, "DB_NAME")
+	if rateLimitWindowSec <= 0 {
+		return nil, fmt.Errorf("RATE_LIMIT_WINDOW_SECONDS должен быть положительным числом, получено %d", rateLimitWindowSec)
 	}
 
-	allowedRaw := getenv("ALLOWED_USERS")
-	if strings.TrimSpace(allowedRaw) == "" {
-		missing = append(missing, "ALLOWED_USERS")
+	workerCount, err := intEnv(getenv, "WORKER_COUNT", 10)
+	if err != nil {
+		return nil, err
+	}
+	if workerCount <= 0 {
+		return nil, fmt.Errorf("WORKER_COUNT должен быть положительным числом, получено %d", workerCount)
 	}
 
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("не заданы обязательные переменные окружения: %s", strings.Join(missing, ", "))
+	queueSize, err := intEnv(getenv, "QUEUE_SIZE", 5000)
+	if err != nil {
+		return nil, err
+	}
+	if queueSize <= 0 {
+		return nil, fmt.Errorf("QUEUE_SIZE должен быть положительным числом, получено %d", queueSize)
 	}
 
-	if _, err := strconv.Atoi(cfg.DBPort); err != nil {
-		return nil, fmt.Errorf("DB_PORT должен быть числом, получено %q: %w", cfg.DBPort, err)
-	}
-
-	cfg.allowedUsers = make(map[string]struct{})
-	for _, u := range strings.Split(allowedRaw, ",") {
-		u = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(u), "@")))
-		if u != "" {
-			cfg.allowedUsers[u] = struct{}{}
-		}
-	}
-	if len(cfg.allowedUsers) == 0 {
-		return nil, fmt.Errorf("ALLOWED_USERS указан, но не содержит ни одного username")
-	}
-
-	return cfg, nil
+	return &Config{
+		BotToken:        token,
+		RateLimitCount:  rateLimitCount,
+		RateLimitWindow: time.Duration(rateLimitWindowSec) * time.Second,
+		WorkerCount:     workerCount,
+		QueueSize:       queueSize,
+	}, nil
 }
 
-// IsAllowed проверяет, есть ли username (без учёта регистра и ведущего "@")
-// в списке администраторов бота. Реализует интерфейс middleware.AccessChecker.
-func (c *Config) IsAllowed(username string) bool {
-	username = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(username), "@"))
-	if username == "" {
-		return false
+// intEnv читает переменную окружения как int; если она не задана —
+// возвращает def. Ошибка возвращается только если значение задано, но
+// не является числом.
+func intEnv(getenv Getenv, key string, def int) (int, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return def, nil
 	}
-	_, ok := c.allowedUsers[username]
-	return ok
-}
-
-// DSN собирает строку подключения к PostgreSQL для pgx, корректно
-// экранируя специальные символы в пароле пользователя.
-func (c *Config) DSN() string {
-	u := url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(c.DBUser, c.DBPassword),
-		Host:   fmt.Sprintf("%s:%s", c.DBHost, c.DBPort),
-		Path:   "/" + c.DBName,
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s должен быть целым числом, получено %q: %w", key, raw, err)
 	}
-	q := u.Query()
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
-	return u.String()
+	return v, nil
 }

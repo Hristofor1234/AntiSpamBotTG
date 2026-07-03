@@ -1,20 +1,22 @@
-// Команда bot — точка входа антиспам-бота для Telegram.
+// Команда bot — точка входа антифлуд-бота для Telegram.
 package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	tgbot "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
 
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/config"
-	"github.com/Hristofor1234/AntiSpamBotTG/internal/database"
-	"github.com/Hristofor1234/AntiSpamBotTG/internal/handler"
-	"github.com/Hristofor1234/AntiSpamBotTG/internal/middleware"
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/dispatcher"
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
 )
 
 func main() {
@@ -35,46 +37,63 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	db, err := database.New(ctx, cfg.DSN())
-	if err != nil {
-		logger.Error("ошибка подключения к БД", "error", err)
-		os.Exit(1)
+	limiter := ratelimit.New(cfg.RateLimitCount, cfg.RateLimitWindow)
+	go limiter.RunCleanup(ctx, time.Minute)
+
+	// Диспетчеру для вызова Telegram API нужна ссылка на *bot.Bot, а
+	// хендлеру бота — ссылка на диспетчер. Разрываем цикл: хендлер
+	// захватывает указатель d по замыканию, значение появится в нём до
+	// того, как реально начнут приходить обновления (b.Start ниже).
+	var d *dispatcher.Dispatcher
+
+	defaultHandler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+		if update.Message == nil || update.Message.From == nil {
+			return
+		}
+		from := update.Message.From
+		if from.IsBot {
+			return
+		}
+
+		d.Submit(dispatcher.Update{
+			MessageID: update.Message.ID,
+			ChatID:    update.Message.Chat.ID,
+			UserID:    from.ID,
+			Username:  from.Username,
+			Text:      update.Message.Text,
+			Timestamp: time.Unix(int64(update.Message.Date), 0),
+		})
 	}
-	defer db.Close()
 
-	if err := db.InitSchema(ctx); err != nil {
-		logger.Error("ошибка инициализации схемы БД", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("схема БД инициализирована")
-
-	n, err := db.LoadCache(ctx)
-	if err != nil {
-		logger.Error("ошибка загрузки кэша ключевых слов", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("кэш ключевых слов загружен", "count", n)
-
-	cmds := handler.NewCommands(db, logger)
-	spam := handler.NewSpam(db, logger)
-	requireAccess := middleware.RequireAccess(cfg, logger)
-
-	b, err := tgbot.New(cfg.BotToken, tgbot.WithDefaultHandler(spam.Filter))
+	b, err := tgbot.New(cfg.BotToken, tgbot.WithDefaultHandler(defaultHandler))
 	if err != nil {
 		logger.Error("ошибка инициализации бота", "error", err)
 		os.Exit(1)
 	}
 
-	// /start доступен всем пользователям.
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand, cmds.Start)
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
+				ChatID: update.Message.Chat.ID,
+				Text: fmt.Sprintf(
+					"Антифлуд-бот активен. Лимит: %d сообщ. / %s — при превышении сообщение удаляется, автор банится с отзывом недавних сообщений.",
+					cfg.RateLimitCount, cfg.RateLimitWindow,
+				),
+			})
+		},
+	)
 
-	// Команды управления чёрным списком — только для ALLOWED_USERS.
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "commands", tgbot.MatchTypeCommand, cmds.Help, requireAccess)
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "add", tgbot.MatchTypeCommand, cmds.Add, requireAccess)
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "remove", tgbot.MatchTypeCommand, cmds.Remove, requireAccess)
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "list", tgbot.MatchTypeCommand, cmds.List, requireAccess)
+	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, logger)
+	d.Start(ctx)
 
-	logger.Info("бот запущен")
+	logger.Info("бот запущен",
+		"rate_limit_count", cfg.RateLimitCount,
+		"rate_limit_window", cfg.RateLimitWindow,
+		"workers", cfg.WorkerCount,
+		"queue_size", cfg.QueueSize)
+
 	b.Start(ctx)
+
+	d.Wait()
 	logger.Info("бот остановлен")
 }
