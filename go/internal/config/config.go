@@ -43,6 +43,24 @@ type Config struct {
 	// (команда /report в ответ на сообщение), чтобы бот забанил автора и
 	// добавил текст в глобальное обучение.
 	ReportThreshold int
+
+	// SilentBan — если true, бот не пишет в чат уведомление о бане
+	// ("🚫 Пользователь X забанен..."). Удаление сообщения, бан и обучение
+	// при этом происходят как обычно — меняется только видимость для чата.
+	SilentBan bool
+
+	// WarnThreshold — сколько раз подряд участник может написать сообщение
+	// с триггер-словом чата (см. /addspam), прежде чем будет забанен вместо
+	// очередного предупреждения. Требует подключённой PostgreSQL — без неё
+	// фильтр по словам отключён (см. main.go).
+	WarnThreshold int
+
+	// CaptchaEnabled/CaptchaTimeout — проверка "не бот" для новых участников
+	// чата: сразу после вступления пользователь получает ограничение на
+	// отправку сообщений и кнопку "Я не бот"; не подтвердил за CaptchaTimeout
+	// — считается ботом и удаляется из чата (кик, не постоянный бан).
+	CaptchaEnabled bool
+	CaptchaTimeout time.Duration
 }
 
 // Getenv — минимальный интерфейс над os.Getenv, чтобы Load был тестируемым.
@@ -121,6 +139,32 @@ func Load(getenv Getenv) (*Config, error) {
 		return nil, fmt.Errorf("REPORT_THRESHOLD должен быть не меньше 2 (иначе теряется смысл коллективной проверки), получено %d", reportThreshold)
 	}
 
+	silentBan, err := boolEnv(getenv, "SILENT_BAN", false)
+	if err != nil {
+		return nil, err
+	}
+
+	warnThreshold, err := intEnv(getenv, "WARN_THRESHOLD", 3)
+	if err != nil {
+		return nil, err
+	}
+	if warnThreshold < 1 {
+		return nil, fmt.Errorf("WARN_THRESHOLD должен быть не меньше 1, получено %d", warnThreshold)
+	}
+
+	captchaEnabled, err := boolEnv(getenv, "CAPTCHA_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+
+	captchaTimeoutSec, err := intEnv(getenv, "CAPTCHA_TIMEOUT_SECONDS", 120)
+	if err != nil {
+		return nil, err
+	}
+	if captchaTimeoutSec <= 0 {
+		return nil, fmt.Errorf("CAPTCHA_TIMEOUT_SECONDS должен быть положительным числом, получено %d", captchaTimeoutSec)
+	}
+
 	return &Config{
 		BotToken:        token,
 		RateLimitCount:  rateLimitCount,
@@ -136,6 +180,12 @@ func Load(getenv Getenv) (*Config, error) {
 		DatabaseURL: databaseURL,
 
 		ReportThreshold: reportThreshold,
+
+		SilentBan:     silentBan,
+		WarnThreshold: warnThreshold,
+
+		CaptchaEnabled: captchaEnabled,
+		CaptchaTimeout: time.Duration(captchaTimeoutSec) * time.Second,
 	}, nil
 }
 
@@ -150,6 +200,20 @@ func intEnv(getenv Getenv, key string, def int) (int, error) {
 	v, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s должен быть целым числом, получено %q: %w", key, raw, err)
+	}
+	return v, nil
+}
+
+// boolEnv читает переменную окружения как bool (true/false/1/0/...); если
+// она не задана — возвращает def.
+func boolEnv(getenv Getenv, key string, def bool) (bool, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s должен быть true/false, получено %q: %w", key, raw, err)
 	}
 	return v, nil
 }

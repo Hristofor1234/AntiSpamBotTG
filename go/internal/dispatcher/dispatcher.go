@@ -43,25 +43,36 @@ type Dispatcher struct {
 	bot         *tgbot.Bot
 	logger      *slog.Logger
 
-	// store — глобальный чёрный список спама в PostgreSQL. Может быть nil:
-	// если БД не настроена или была недоступна при старте, диспетчер просто
-	// пропускает уровень глобальной проверки/обучения и работает только на
-	// rate-limit — см. processUpdate.
+	// store — глобальный чёрный список спама и триггер-слова чатов в
+	// PostgreSQL. Может быть nil: если БД не настроена или была недоступна
+	// при старте, диспетчер пропускает уровни глобальной проверки/обучения и
+	// фильтра по словам, работает только на rate-limit — см. processUpdate.
 	store *storage.Store
+
+	// silent — не писать в чат уведомление о бане ("🚫 Пользователь X
+	// забанен..."). Само удаление/бан/обучение silent не затрагивает.
+	silent bool
+
+	// warnThreshold — сколько предупреждений по триггер-словам подряд
+	// допускается, прежде чем бан вместо очередного предупреждения.
+	warnThreshold int
 
 	wg sync.WaitGroup
 }
 
 // New создаёт диспетчер с workerCount воркерами и очередью на queueSize
-// обновлений. store может быть nil — глобальное обучение тогда отключено.
-func New(workerCount, queueSize int, limiter *ratelimit.Limiter, b *tgbot.Bot, store *storage.Store, logger *slog.Logger) *Dispatcher {
+// обновлений. store может быть nil — тогда глобальное обучение и фильтр по
+// словам отключены, работает только rate-limit.
+func New(workerCount, queueSize int, limiter *ratelimit.Limiter, b *tgbot.Bot, store *storage.Store, silent bool, warnThreshold int, logger *slog.Logger) *Dispatcher {
 	return &Dispatcher{
-		workerCount: workerCount,
-		jobQueue:    make(chan Update, queueSize),
-		limiter:     limiter,
-		bot:         b,
-		store:       store,
-		logger:      logger,
+		workerCount:   workerCount,
+		jobQueue:      make(chan Update, queueSize),
+		limiter:       limiter,
+		bot:           b,
+		store:         store,
+		silent:        silent,
+		warnThreshold: warnThreshold,
+		logger:        logger,
 	}
 }
 
@@ -108,13 +119,16 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 	}
 }
 
-// processUpdate — три уровня обороны от спама:
+// processUpdate — уровни обороны от спама, по возрастанию "стоимости":
 //  1. глобальный чёрный список (PostgreSQL, если подключена) — мгновенный
 //     отсев уже выученного спама, независимо от истории конкретного чата;
 //  2. rate-limit (in-memory) — ловит новые, ещё не выученные вспышки флуда;
-//  3. при бане по флуду текст сообщения уходит в обучение — в следующий раз
-//     тот же (с точностью до нормализации) спам поймает уже уровень 1,
-//     в любом чате, где стоит бот.
+//  3. триггер-слова чата (PostgreSQL, если подключена и админы что-то
+//     добавили через /addspam) — предупреждение, а после warnThreshold
+//     предупреждений подряд — бан;
+//  4. при бане по флуду или по накопленным предупреждениям текст уходит в
+//     обучение — в следующий раз тот же (с точностью до нормализации) спам
+//     поймает уже уровень 1, в любом чате, где стоит бот.
 func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 	if d.store != nil && u.Text != "" {
 		known, err := d.store.IsKnownSpam(ctx, u.Text)
@@ -132,14 +146,78 @@ func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 		}
 	}
 
-	if d.limiter.Allow(u.UserID) {
-		d.logger.Info("сообщение принято", "user_id", u.UserID, "chat_id", u.ChatID)
+	if !d.limiter.Allow(u.UserID) {
+		d.logger.Warn("обнаружен флуд, бан пользователя",
+			"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID)
+		d.ban(ctx, u, true)
 		return
 	}
 
-	d.logger.Warn("обнаружен флуд, бан пользователя",
-		"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID)
-	d.ban(ctx, u, true)
+	if d.store != nil && u.Text != "" {
+		phrase, matched, err := d.store.MatchTrigger(ctx, u.ChatID, u.Text)
+		switch {
+		case err != nil:
+			d.logger.Error("не удалось проверить триггер-слова чата, продолжаем без фильтра",
+				"error", err, "user_id", u.UserID, "chat_id", u.ChatID)
+		case matched:
+			d.handleTriggerMatch(ctx, u, phrase)
+			return
+		}
+	}
+
+	d.logger.Info("сообщение принято", "user_id", u.UserID, "chat_id", u.ChatID)
+}
+
+// handleTriggerMatch реагирует на совпадение с триггер-словом чата: сначала
+// предупреждения (удаление сообщения + счётчик в PostgreSQL), а после
+// warnThreshold предупреждений подряд — бан с обучением, как за флуд.
+func (d *Dispatcher) handleTriggerMatch(ctx context.Context, u Update, phrase string) {
+	count, err := d.store.AddWarning(ctx, u.ChatID, u.UserID)
+	if err != nil {
+		d.logger.Error("не удалось сохранить предупреждение, сообщение всё равно удаляем",
+			"error", err, "user_id", u.UserID, "chat_id", u.ChatID)
+		count = d.warnThreshold // при сбое БД перестраховываемся в сторону бана, а не бездействия
+	}
+
+	if count >= d.warnThreshold {
+		d.logger.Warn("превышен лимит предупреждений по триггер-словам, бан",
+			"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID,
+			"phrase", phrase, "warnings", count)
+		d.ban(ctx, u, true)
+		if err := d.store.ResetWarnings(ctx, u.ChatID, u.UserID); err != nil {
+			d.logger.Error("не удалось сбросить счётчик предупреждений после бана", "error", err)
+		}
+		return
+	}
+
+	d.logger.Warn("сообщение с триггер-словом, предупреждение",
+		"user_id", u.UserID, "chat_id", u.ChatID, "phrase", phrase, "warnings", count)
+
+	if err := withRetry(ctx, d.logger, "deleteMessage", func() error {
+		_, err := d.bot.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
+			ChatID:    u.ChatID,
+			MessageID: u.MessageID,
+		})
+		return err
+	}); err != nil {
+		d.logger.Error("не удалось удалить сообщение с триггер-словом",
+			"error", err, "chat_id", u.ChatID, "message_id", u.MessageID)
+	}
+
+	if d.silent {
+		return
+	}
+
+	if err := withRetry(ctx, d.logger, "sendMessage", func() error {
+		_, err := d.bot.SendMessage(ctx, &tgbot.SendMessageParams{
+			ChatID: u.ChatID,
+			Text: fmt.Sprintf("⚠️ %s: предупреждение %d/%d за запрещённое слово. Сообщение удалено.",
+				displayName(u), count, d.warnThreshold),
+		})
+		return err
+	}); err != nil {
+		d.logger.Error("не удалось отправить предупреждение", "error", err)
+	}
 }
 
 // BanSpammer банит пользователя authorID за сообщение messageID в чате
@@ -194,14 +272,16 @@ func (d *Dispatcher) ban(ctx context.Context, u Update, learn bool) {
 		return
 	}
 
-	if err := withRetry(ctx, d.logger, "sendMessage", func() error {
-		_, err := d.bot.SendMessage(ctx, &tgbot.SendMessageParams{
-			ChatID: u.ChatID,
-			Text:   fmt.Sprintf("🚫 Пользователь %s забанен за спам.", displayName(u)),
-		})
-		return err
-	}); err != nil {
-		d.logger.Error("не удалось отправить уведомление о бане", "error", err)
+	if !d.silent {
+		if err := withRetry(ctx, d.logger, "sendMessage", func() error {
+			_, err := d.bot.SendMessage(ctx, &tgbot.SendMessageParams{
+				ChatID: u.ChatID,
+				Text:   fmt.Sprintf("🚫 Пользователь %s забанен за спам.", displayName(u)),
+			})
+			return err
+		}); err != nil {
+			d.logger.Error("не удалось отправить уведомление о бане", "error", err)
+		}
 	}
 
 	if !learn || d.store == nil || u.Text == "" {

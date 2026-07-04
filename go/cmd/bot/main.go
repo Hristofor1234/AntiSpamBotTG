@@ -14,6 +14,7 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/joho/godotenv"
 
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/captcha"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/config"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/dispatcher"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
@@ -53,6 +54,12 @@ func main() {
 	reportTracker := reports.New(cfg.ReportThreshold)
 	go reportTracker.RunCleanup(ctx, time.Hour)
 
+	// Капча для новых участников чата: сразу после вступления пользователь
+	// мутится и должен подтвердить, что не бот, за cfg.CaptchaTimeout.
+	// Менеджер создаём всегда (дёшево), а использование включаем/выключаем
+	// через cfg.CaptchaEnabled в местах вызова.
+	captchaManager := captcha.New(cfg.CaptchaTimeout)
+
 	// Глобальное обучение (PostgreSQL) — необязательная фича. Если
 	// DATABASE_URL не задан или БД оказалась недоступна при старте, бот не
 	// падает — просто работает без глобального чёрного списка, только на
@@ -82,11 +89,32 @@ func main() {
 	var d *dispatcher.Dispatcher
 
 	defaultHandler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
-		if update.Message == nil || update.Message.From == nil {
+		if update.Message == nil {
+			return
+		}
+
+		// Новые участники чата — капча, а не антифлуд-конвейер.
+		if cfg.CaptchaEnabled && len(update.Message.NewChatMembers) > 0 {
+			handleNewChatMembers(ctx, b, captchaManager, cfg, logger, update.Message.Chat.ID, update.Message.NewChatMembers)
+			return
+		}
+
+		if update.Message.From == nil {
 			return
 		}
 		from := update.Message.From
 		if from.IsBot {
+			return
+		}
+
+		if cfg.CaptchaEnabled && captchaManager.IsPending(update.Message.Chat.ID, from.ID) {
+			// Ограничение прав в Telegram уже должно не пускать такие
+			// сообщения, но подчищаем на случай гонки/базовых групп, где
+			// ограничения соблюдаются не так строго, как в супергруппах.
+			_, _ = b.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				MessageID: update.Message.ID,
+			})
 			return
 		}
 
@@ -125,6 +153,16 @@ func main() {
 		learningStatus = "включено"
 	}
 
+	captchaStatus := "выключена"
+	if cfg.CaptchaEnabled {
+		captchaStatus = fmt.Sprintf("включена (таймаут %s)", cfg.CaptchaTimeout)
+	}
+
+	silentStatus := "нет"
+	if cfg.SilentBan {
+		silentStatus = "да"
+	}
+
 	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand,
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			text := fmt.Sprintf(
@@ -132,9 +170,12 @@ func main() {
 					"Режим приёма обновлений: %s\n"+
 					"Лимит: %d сообщ. / %s\n"+
 					"Воркеров: %d, очередь: %d\n"+
-					"Глобальное обучение (PostgreSQL): %s\n\n"+
-					"При превышении лимита сообщение удаляется, автор банится с отзывом недавних сообщений.",
-				mode, cfg.RateLimitCount, cfg.RateLimitWindow, cfg.WorkerCount, cfg.QueueSize, learningStatus,
+					"Глобальное обучение (PostgreSQL): %s\n"+
+					"Капча для новичков: %s\n"+
+					"Тихий режим бана: %s\n\n"+
+					"При превышении лимита или срабатывании фильтра сообщение удаляется, автор банится с отзывом недавних сообщений.",
+				mode, cfg.RateLimitCount, cfg.RateLimitWindow, cfg.WorkerCount, cfg.QueueSize,
+				learningStatus, captchaStatus, silentStatus,
 			)
 
 			_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
@@ -198,7 +239,15 @@ func main() {
 		},
 	)
 
-	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, store, logger)
+	if cfg.CaptchaEnabled {
+		registerCaptchaCallbackHandler(b, captchaManager, logger)
+	}
+
+	// /addspam, /removespam, /triggers — фильтр по словам, свой для каждого
+	// чата, управляется его администраторами.
+	registerAdminHandlers(b, store, logger)
+
+	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, store, cfg.SilentBan, cfg.WarnThreshold, logger)
 	d.Start(ctx)
 
 	logger.Info("бот запущен",
