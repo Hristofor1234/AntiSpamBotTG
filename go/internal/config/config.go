@@ -20,6 +20,24 @@ type Config struct {
 	// Пул воркеров, обрабатывающих очередь обновлений.
 	WorkerCount int
 	QueueSize   int
+
+	// Webhook: если WebhookURL задан, бот принимает обновления через
+	// HTTP-сервер (setWebhook) вместо long polling. WebhookURL — это
+	// публичный HTTPS-адрес (например, https://example.com/webhook/<путь>),
+	// на который Telegram будет слать апдейты; обычно это TLS-домен с
+	// reverse-proxy (nginx/Caddy) перед WebhookListenAddr. Если WebhookURL
+	// пуст — используется Long Polling (b.Start), поведение не меняется.
+	WebhookURL         string
+	WebhookSecretToken string
+	WebhookListenAddr  string
+	WebhookPath        string
+
+	// DatabaseURL — DSN PostgreSQL для глобального обучения (общий чёрный
+	// список спама между всеми чатами, где стоит бот). Необязательный: если
+	// пуст, бот работает только на in-memory rate-limit, как раньше. Если
+	// PostgreSQL окажется недоступен при старте, бот тоже не падает — просто
+	// продолжает без глобального обучения (см. main.go).
+	DatabaseURL string
 }
 
 // Getenv — минимальный интерфейс над os.Getenv, чтобы Load был тестируемым.
@@ -65,12 +83,44 @@ func Load(getenv Getenv) (*Config, error) {
 		return nil, fmt.Errorf("QUEUE_SIZE должен быть положительным числом, получено %d", queueSize)
 	}
 
+	webhookURL := strings.TrimSpace(getenv("WEBHOOK_URL"))
+	if webhookURL != "" && !strings.HasPrefix(webhookURL, "https://") {
+		return nil, fmt.Errorf("WEBHOOK_URL должен начинаться с https:// (требование Telegram), получено %q", webhookURL)
+	}
+
+	webhookSecretToken := strings.TrimSpace(getenv("WEBHOOK_SECRET_TOKEN"))
+	if webhookURL != "" && webhookSecretToken == "" {
+		return nil, fmt.Errorf("при заданном WEBHOOK_URL обязательна WEBHOOK_SECRET_TOKEN (защита от поддельных запросов на вебхук)")
+	}
+
+	webhookListenAddr := strings.TrimSpace(getenv("WEBHOOK_LISTEN_ADDR"))
+	if webhookListenAddr == "" {
+		webhookListenAddr = ":8080"
+	}
+
+	webhookPath := strings.TrimSpace(getenv("WEBHOOK_PATH"))
+	if webhookPath == "" {
+		webhookPath = "/webhook"
+	}
+	if !strings.HasPrefix(webhookPath, "/") {
+		webhookPath = "/" + webhookPath
+	}
+
+	databaseURL := strings.TrimSpace(getenv("DATABASE_URL"))
+
 	return &Config{
 		BotToken:        token,
 		RateLimitCount:  rateLimitCount,
 		RateLimitWindow: time.Duration(rateLimitWindowSec) * time.Second,
 		WorkerCount:     workerCount,
 		QueueSize:       queueSize,
+
+		WebhookURL:         webhookURL,
+		WebhookSecretToken: webhookSecretToken,
+		WebhookListenAddr:  webhookListenAddr,
+		WebhookPath:        webhookPath,
+
+		DatabaseURL: databaseURL,
 	}, nil
 }
 

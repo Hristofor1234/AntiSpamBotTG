@@ -5,3 +5,30 @@ services:
     build: .
     restart: always
     env_file: .env
+    # Порт нужен только в режиме webhook (когда в .env задан WEBHOOK_URL).
+    # Для Long Polling (режим по умолчанию) секцию ports можно не трогать —
+    # бот ничего не слушает и порт не нужен.
+    ports:
+      - "8080:8080"
+
+  # PostgreSQL для глобального обучения — сервис необязательный. Бот сам
+  # переживёт его отсутствие (просто отключит глобальный чёрный список), так
+  # что зависимости между bot и db здесь нет: если DATABASE_URL в .env не
+  # задан, эту секцию можно смело удалить целиком.
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: antispam
+      POSTGRES_PASSWORD: antispam
+      POSTGRES_DB: antispam
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U antispam"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

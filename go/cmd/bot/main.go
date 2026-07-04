@@ -17,7 +17,13 @@ import (
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/config"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/dispatcher"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
 )
+
+// dbInitTimeout — сколько ждём подключения к PostgreSQL при старте
+// (storage.New сам делает несколько попыток Ping с паузами — таймаут должен
+// с запасом их покрывать).
+const dbInitTimeout = 30 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -39,6 +45,28 @@ func main() {
 
 	limiter := ratelimit.New(cfg.RateLimitCount, cfg.RateLimitWindow)
 	go limiter.RunCleanup(ctx, time.Minute)
+
+	// Глобальное обучение (PostgreSQL) — необязательная фича. Если
+	// DATABASE_URL не задан или БД оказалась недоступна при старте, бот не
+	// падает — просто работает без глобального чёрного списка, только на
+	// rate-limit, как раньше.
+	var store *storage.Store
+	if cfg.DatabaseURL != "" {
+		initCtx, initCancel := context.WithTimeout(ctx, dbInitTimeout)
+		s, err := storage.New(initCtx, cfg.DatabaseURL)
+		initCancel()
+
+		if err != nil {
+			logger.Error("не удалось подключиться к PostgreSQL, глобальное обучение отключено",
+				"error", err)
+		} else {
+			store = s
+			defer store.Close()
+			logger.Info("подключение к PostgreSQL установлено, глобальное обучение включено")
+		}
+	} else {
+		logger.Info("DATABASE_URL не задан, глобальное обучение отключено (только rate-limit)")
+	}
 
 	// Диспетчеру для вызова Telegram API нужна ссылка на *bot.Bot, а
 	// хендлеру бота — ссылка на диспетчер. Разрываем цикл: хендлер
@@ -65,7 +93,16 @@ func main() {
 		})
 	}
 
-	b, err := tgbot.New(cfg.BotToken, tgbot.WithDefaultHandler(defaultHandler))
+	opts := []tgbot.Option{tgbot.WithDefaultHandler(defaultHandler)}
+	if cfg.WebhookSecretToken != "" {
+		// Telegram присылает этот токен в заголовке X-Telegram-Bot-Api-Secret-Token
+		// с каждым webhook-запросом — библиотека сверяет его сама и молча
+		// игнорирует запрос при несовпадении. Это защита от поддельных
+		// POST-запросов на публичный /webhook от кого угодно в интернете.
+		opts = append(opts, tgbot.WithWebhookSecretToken(cfg.WebhookSecretToken))
+	}
+
+	b, err := tgbot.New(cfg.BotToken, opts...)
 	if err != nil {
 		logger.Error("ошибка инициализации бота", "error", err)
 		os.Exit(1)
@@ -83,16 +120,28 @@ func main() {
 		},
 	)
 
-	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, logger)
+	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, store, logger)
 	d.Start(ctx)
 
+	mode := "long-polling"
+	if cfg.WebhookURL != "" {
+		mode = "webhook"
+	}
+
 	logger.Info("бот запущен",
+		"mode", mode,
 		"rate_limit_count", cfg.RateLimitCount,
 		"rate_limit_window", cfg.RateLimitWindow,
 		"workers", cfg.WorkerCount,
 		"queue_size", cfg.QueueSize)
 
-	b.Start(ctx)
+	if cfg.WebhookURL != "" {
+		if err := runWebhook(ctx, b, cfg, logger); err != nil {
+			logger.Error("webhook-сервер завершился с ошибкой", "error", err)
+		}
+	} else {
+		b.Start(ctx)
+	}
 
 	d.Wait()
 	logger.Info("бот остановлен")
