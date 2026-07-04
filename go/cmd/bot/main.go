@@ -17,6 +17,7 @@ import (
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/config"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/dispatcher"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/reports"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
 )
 
@@ -45,6 +46,12 @@ func main() {
 
 	limiter := ratelimit.New(cfg.RateLimitCount, cfg.RateLimitWindow)
 	go limiter.RunCleanup(ctx, time.Minute)
+
+	// Обучение через жалобы: /report в ответ на сообщение засчитывается как
+	// голос; когда наберётся cfg.ReportThreshold разных жалобщиков — бан +
+	// (если БД подключена) обучение глобального чёрного списка.
+	reportTracker := reports.New(cfg.ReportThreshold)
+	go reportTracker.RunCleanup(ctx, time.Hour)
 
 	// Глобальное обучение (PostgreSQL) — необязательная фича. Если
 	// DATABASE_URL не задан или БД оказалась недоступна при старте, бот не
@@ -108,25 +115,91 @@ func main() {
 		os.Exit(1)
 	}
 
+	mode := "Long Polling"
+	if cfg.WebhookURL != "" {
+		mode = "Webhook"
+	}
+
+	learningStatus := "отключено (не задан DATABASE_URL)"
+	if store != nil {
+		learningStatus = "включено"
+	}
+
 	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand,
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			text := fmt.Sprintf(
+				"*Антиспам-бот активен*\n\n"+
+					"Режим приёма обновлений: %s\n"+
+					"Лимит: %d сообщ. / %s\n"+
+					"Воркеров: %d, очередь: %d\n"+
+					"Глобальное обучение (PostgreSQL): %s\n\n"+
+					"При превышении лимита сообщение удаляется, автор банится с отзывом недавних сообщений.",
+				mode, cfg.RateLimitCount, cfg.RateLimitWindow, cfg.WorkerCount, cfg.QueueSize, learningStatus,
+			)
+
+			_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
+				ChatID:    update.Message.Chat.ID,
+				Text:      text,
+				ParseMode: models.ParseModeMarkdownV1,
+			})
+			if err != nil {
+				logger.Error("не удалось отправить ответ на /start", "error", err, "chat_id", update.Message.Chat.ID)
+			}
+		},
+	)
+
+	// /report — обучение через жалобы сообщества: отправляется в ответ
+	// (reply) на подозрительное сообщение. Как только на одно и то же
+	// сообщение пожалуются cfg.ReportThreshold разных пользователей, автор
+	// банится, а текст уходит в глобальное обучение — так же, как при бане
+	// за флуд (см. dispatcher.BanSpammer).
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "report", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil || msg.From == nil {
+				return
+			}
+
+			target := msg.ReplyToMessage
+			if target == nil || target.From == nil {
+				_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
+					ChatID:          msg.Chat.ID,
+					Text:            "Команду /report нужно отправить в ответ (reply) на сообщение, которое считаете спамом.",
+					ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
+				})
+				return
+			}
+			if target.From.IsBot {
+				return
+			}
+			if target.From.ID == msg.From.ID {
+				_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
+					ChatID:          msg.Chat.ID,
+					Text:            "Нельзя пожаловаться на собственное сообщение.",
+					ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
+				})
+				return
+			}
+
+			count, triggered := reportTracker.Report(msg.Chat.ID, target.ID, msg.From.ID)
+			if triggered {
+				logger.Warn("сообщение забанено по жалобам сообщества",
+					"chat_id", msg.Chat.ID, "message_id", target.ID,
+					"author_id", target.From.ID, "reports", count)
+				d.BanSpammer(ctx, msg.Chat.ID, target.ID, target.From.ID, target.From.Username, target.Text)
+				return
+			}
+
 			_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
-				ChatID: update.Message.Chat.ID,
-				Text: fmt.Sprintf(
-					"Антифлуд-бот активен. Лимит: %d сообщ. / %s — при превышении сообщение удаляется, автор банится с отзывом недавних сообщений.",
-					cfg.RateLimitCount, cfg.RateLimitWindow,
-				),
+				ChatID:          msg.Chat.ID,
+				Text:            fmt.Sprintf("Жалоба принята (%d/%d).", count, cfg.ReportThreshold),
+				ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
 			})
 		},
 	)
 
 	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, store, logger)
 	d.Start(ctx)
-
-	mode := "long-polling"
-	if cfg.WebhookURL != "" {
-		mode = "webhook"
-	}
 
 	logger.Info("бот запущен",
 		"mode", mode,

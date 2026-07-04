@@ -142,6 +142,21 @@ func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 	d.ban(ctx, u, true)
 }
 
+// BanSpammer банит пользователя authorID за сообщение messageID в чате
+// chatID и (если подключена БД) обучает на его тексте глобальный чёрный
+// список — так же, как при автоматическом бане за флуд. Используется
+// хендлером команды /report: жалобы разных участников чата — ещё один
+// источник обучения, наравне с rate-limit.
+func (d *Dispatcher) BanSpammer(ctx context.Context, chatID int64, messageID int, authorID int64, authorUsername, text string) {
+	d.ban(ctx, Update{
+		ChatID:    chatID,
+		MessageID: messageID,
+		UserID:    authorID,
+		Username:  authorUsername,
+		Text:      text,
+	}, true)
+}
+
 // ban удаляет сообщение и банит пользователя (с отзывом недавних сообщений в
 // чате), затем уведомляет чат. Вызовы к Telegram API обёрнуты в withRetry:
 // если Telegram отвечает 429 Too Many Requests (например, бот банит разом

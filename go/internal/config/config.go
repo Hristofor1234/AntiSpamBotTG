@@ -38,6 +38,11 @@ type Config struct {
 	// PostgreSQL окажется недоступен при старте, бот тоже не падает — просто
 	// продолжает без глобального обучения (см. main.go).
 	DatabaseURL string
+
+	// ReportThreshold — сколько разных пользователей должны пожаловаться
+	// (команда /report в ответ на сообщение), чтобы бот забанил автора и
+	// добавил текст в глобальное обучение.
+	ReportThreshold int
 }
 
 // Getenv — минимальный интерфейс над os.Getenv, чтобы Load был тестируемым.
@@ -108,6 +113,14 @@ func Load(getenv Getenv) (*Config, error) {
 
 	databaseURL := strings.TrimSpace(getenv("DATABASE_URL"))
 
+	reportThreshold, err := intEnv(getenv, "REPORT_THRESHOLD", 3)
+	if err != nil {
+		return nil, err
+	}
+	if reportThreshold < 2 {
+		return nil, fmt.Errorf("REPORT_THRESHOLD должен быть не меньше 2 (иначе теряется смысл коллективной проверки), получено %d", reportThreshold)
+	}
+
 	return &Config{
 		BotToken:        token,
 		RateLimitCount:  rateLimitCount,
@@ -121,6 +134,8 @@ func Load(getenv Getenv) (*Config, error) {
 		WebhookPath:        webhookPath,
 
 		DatabaseURL: databaseURL,
+
+		ReportThreshold: reportThreshold,
 	}, nil
 }
 
