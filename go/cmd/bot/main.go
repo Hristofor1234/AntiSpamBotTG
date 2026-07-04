@@ -148,47 +148,20 @@ func main() {
 		mode = "Webhook"
 	}
 
-	learningStatus := "отключено (не задан DATABASE_URL)"
-	if store != nil {
-		learningStatus = "включено"
+	// /start и /help показывают один и тот же текст (sendHelp, см. help.go):
+	// полный список функций бота и текущие настройки. dbConnected — реальное
+	// состояние подключения (store != nil), а не просто "задан ли
+	// DATABASE_URL": БД могла быть недоступна при старте (см. выше).
+	dbConnected := store != nil
+	helpHandler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+		if update.Message == nil {
+			return
+		}
+		sendHelp(ctx, b, update.Message.Chat.ID, cfg, mode, dbConnected, logger)
 	}
 
-	captchaStatus := "выключена"
-	if cfg.CaptchaEnabled {
-		captchaStatus = fmt.Sprintf("включена (таймаут %s)", cfg.CaptchaTimeout)
-	}
-
-	silentStatus := "нет"
-	if cfg.SilentBan {
-		silentStatus = "да"
-	}
-
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand,
-		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
-			text := fmt.Sprintf(
-				"*Антиспам-бот активен*\n\n"+
-					"Режим приёма обновлений: %s\n"+
-					"Лимит: %d сообщ. / %s\n"+
-					"Воркеров: %d, очередь: %d\n"+
-					"Глобальное обучение (PostgreSQL): %s\n"+
-					"Проверка ссылок по домену: %s\n"+
-					"Капча для новичков: %s\n"+
-					"Тихий режим бана: %s\n\n"+
-					"При превышении лимита или срабатывании фильтра сообщение удаляется, автор банится с отзывом недавних сообщений.",
-				mode, cfg.RateLimitCount, cfg.RateLimitWindow, cfg.WorkerCount, cfg.QueueSize,
-				learningStatus, learningStatus, captchaStatus, silentStatus,
-			)
-
-			_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
-				ChatID:    update.Message.Chat.ID,
-				Text:      text,
-				ParseMode: models.ParseModeMarkdownV1,
-			})
-			if err != nil {
-				logger.Error("не удалось отправить ответ на /start", "error", err, "chat_id", update.Message.Chat.ID)
-			}
-		},
-	)
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand, helpHandler)
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "help", tgbot.MatchTypeCommand, helpHandler)
 
 	// /report — обучение через жалобы сообщества: отправляется в ответ
 	// (reply) на подозрительное сообщение. Как только на одно и то же
