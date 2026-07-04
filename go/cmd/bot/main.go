@@ -171,11 +171,12 @@ func main() {
 					"Лимит: %d сообщ. / %s\n"+
 					"Воркеров: %d, очередь: %d\n"+
 					"Глобальное обучение (PostgreSQL): %s\n"+
+					"Проверка ссылок по домену: %s\n"+
 					"Капча для новичков: %s\n"+
 					"Тихий режим бана: %s\n\n"+
 					"При превышении лимита или срабатывании фильтра сообщение удаляется, автор банится с отзывом недавних сообщений.",
 				mode, cfg.RateLimitCount, cfg.RateLimitWindow, cfg.WorkerCount, cfg.QueueSize,
-				learningStatus, captchaStatus, silentStatus,
+				learningStatus, learningStatus, captchaStatus, silentStatus,
 			)
 
 			_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
@@ -243,12 +244,17 @@ func main() {
 		registerCaptchaCallbackHandler(b, captchaManager, logger)
 	}
 
-	// /addspam, /removespam, /triggers — фильтр по словам, свой для каждого
-	// чата, управляется его администраторами.
-	registerAdminHandlers(b, store, logger)
-
+	// d нужен обработчику /ban (registerAdminHandlers ниже) — присваиваем до
+	// регистрации хендлеров, а не после, как раньше: захват указателя d по
+	// замыканию (как в defaultHandler) сработал бы и с nil на момент
+	// регистрации, но передача d обычным параметром функции — нет, это уже
+	// копия значения на момент вызова.
 	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, store, cfg.SilentBan, cfg.WarnThreshold, logger)
 	d.Start(ctx)
+
+	// /addspam, /removespam, /triggers, /blockdomain, /unblockdomain,
+	// /domains, /ban — административные команды, для текущего чата.
+	registerAdminHandlers(b, store, d, logger)
 
 	logger.Info("бот запущен",
 		"mode", mode,

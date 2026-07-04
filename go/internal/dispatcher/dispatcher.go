@@ -13,6 +13,7 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/linkcheck"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
 )
@@ -122,13 +123,16 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 // processUpdate — уровни обороны от спама, по возрастанию "стоимости":
 //  1. глобальный чёрный список (PostgreSQL, если подключена) — мгновенный
 //     отсев уже выученного спама, независимо от истории конкретного чата;
-//  2. rate-limit (in-memory) — ловит новые, ещё не выученные вспышки флуда;
-//  3. триггер-слова чата (PostgreSQL, если подключена и админы что-то
+//  2. известные опасные домены (PostgreSQL, если подключена) — ссылки на
+//     домены, встречавшиеся ранее в забаненных сообщениях (в любом чате),
+//     отсекаются даже если сам текст сообщения новый — см. internal/linkcheck;
+//  3. rate-limit (in-memory) — ловит новые, ещё не выученные вспышки флуда;
+//  4. триггер-слова чата (PostgreSQL, если подключена и админы что-то
 //     добавили через /addspam) — предупреждение, а после warnThreshold
 //     предупреждений подряд — бан;
-//  4. при бане по флуду или по накопленным предупреждениям текст уходит в
-//     обучение — в следующий раз тот же (с точностью до нормализации) спам
-//     поймает уже уровень 1, в любом чате, где стоит бот.
+//  5. при бане по флуду или по накопленным предупреждениям текст (и домены
+//     ссылок в нём) уходят в обучение — в следующий раз тот же спам поймает
+//     уже уровень 1 или 2, в любом чате, где стоит бот.
 func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 	if d.store != nil && u.Text != "" {
 		known, err := d.store.IsKnownSpam(ctx, u.Text)
@@ -143,6 +147,22 @@ func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 				"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID)
 			d.ban(ctx, u, false)
 			return
+		}
+	}
+
+	if d.store != nil && u.Text != "" {
+		if domains := linkcheck.ExtractDomains(u.Text); len(domains) > 0 {
+			domain, matched, err := d.store.IsKnownBadDomain(ctx, domains)
+			switch {
+			case err != nil:
+				d.logger.Error("не удалось проверить список опасных доменов, продолжаем без него",
+					"error", err, "user_id", u.UserID, "chat_id", u.ChatID)
+			case matched:
+				d.logger.Warn("сообщение содержит известный опасный домен",
+					"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID, "domain", domain)
+				d.ban(ctx, u, false)
+				return
+			}
 		}
 	}
 
@@ -297,6 +317,12 @@ func (d *Dispatcher) ban(ctx context.Context, u Update, learn bool) {
 
 		if err := d.store.LearnSpam(learnCtx, text); err != nil {
 			d.logger.Error("не удалось сохранить спам в глобальный чёрный список", "error", err)
+		}
+
+		if domains := linkcheck.ExtractDomains(text); len(domains) > 0 {
+			if err := d.store.LearnDomains(learnCtx, domains, text); err != nil {
+				d.logger.Error("не удалось сохранить опасные домены", "error", err)
+			}
 		}
 	}(u.Text)
 }

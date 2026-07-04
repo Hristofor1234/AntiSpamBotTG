@@ -9,11 +9,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -69,6 +71,12 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 			count   INT NOT NULL DEFAULT 0,
 			PRIMARY KEY (chat_id, user_id)
 		);
+
+		CREATE TABLE IF NOT EXISTS bad_domains (
+			domain      TEXT PRIMARY KEY,
+			sample_text TEXT NOT NULL,
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
 	`
 	if _, err := pool.Exec(ctx, migration); err != nil {
 		pool.Close()
@@ -121,6 +129,102 @@ func (s *Store) IsKnownSpam(ctx context.Context, text string) (bool, error) {
 		return false, err
 	}
 	return exists, nil
+}
+
+// LearnDomains добавляет домены в глобальный список опасных доменов (см.
+// пакет internal/linkcheck) — часть того же "обучения на банах", что и
+// LearnSpam, только по домену ссылки, а не по хэшу всего текста. sampleText
+// сохраняется для контекста (что за сообщение содержало этот домен), не
+// участвует в сравнении.
+func (s *Store) LearnDomains(ctx context.Context, domains []string, sampleText string) error {
+	if len(domains) == 0 {
+		return nil
+	}
+
+	sample := sampleText
+	if len(sample) > sampleMaxLen {
+		sample = sample[:sampleMaxLen]
+	}
+
+	const query = `
+		INSERT INTO bad_domains (domain, sample_text)
+		VALUES ($1, $2)
+		ON CONFLICT (domain) DO NOTHING
+	`
+
+	batch := &pgx.Batch{}
+	for _, d := range domains {
+		batch.Queue(query, d, sample)
+	}
+
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for range domains {
+		if _, err := br.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IsKnownBadDomain проверяет, встречается ли хоть один из domains в
+// глобальном списке опасных доменов, и если да — возвращает первый
+// совпавший (для логов).
+func (s *Store) IsKnownBadDomain(ctx context.Context, domains []string) (domain string, matched bool, err error) {
+	if len(domains) == 0 {
+		return "", false, nil
+	}
+
+	const query = `SELECT domain FROM bad_domains WHERE domain = ANY($1) LIMIT 1`
+	err = s.pool.QueryRow(ctx, query, domains).Scan(&domain)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return domain, true, nil
+}
+
+// RemoveDomain удаляет домен из глобального списка опасных доменов
+// (команда /unblockdomain). removed=false означает, что такого домена и не
+// было.
+func (s *Store) RemoveDomain(ctx context.Context, domain string) (removed bool, err error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.TrimPrefix(domain, "www.")
+	if domain == "" {
+		return false, nil
+	}
+
+	const query = `DELETE FROM bad_domains WHERE domain = $1`
+	tag, err := s.pool.Exec(ctx, query, domain)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ListRecentDomains возвращает до limit последних добавленных в глобальный
+// список опасных доменов записей (самые новые первыми) — для команды
+// /domains.
+func (s *Store) ListRecentDomains(ctx context.Context, limit int) ([]string, error) {
+	const query = `SELECT domain FROM bad_domains ORDER BY created_at DESC LIMIT $1`
+	rows, err := s.pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var domains []string
+	for rows.Next() {
+		var domain string
+		if err := rows.Scan(&domain); err != nil {
+			return nil, err
+		}
+		domains = append(domains, domain)
+	}
+	return domains, rows.Err()
 }
 
 // AddTrigger добавляет фразу в список триггер-слов конкретного чата

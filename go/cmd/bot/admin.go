@@ -9,6 +9,7 @@ import (
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/dispatcher"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
 )
 
@@ -36,10 +37,12 @@ func commandArgument(msg *models.Message) string {
 	return ""
 }
 
-// registerAdminHandlers регистрирует команды управления фильтром по словам:
-// /addspam, /removespam, /triggers. Требуют подключённой PostgreSQL — без
-// неё отвечают понятным сообщением, а не молчат.
-func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, logger *slog.Logger) {
+// registerAdminHandlers регистрирует административные команды: /addspam,
+// /removespam, /triggers, /blockdomain, /unblockdomain, /domains (требуют
+// подключённой PostgreSQL — без неё отвечают понятным сообщением, а не
+// молчат) и /ban (работает и без БД — обучение при бане просто не
+// произойдёт, см. internal/dispatcher.ban).
+func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dispatcher, logger *slog.Logger) {
 	reply := func(ctx context.Context, msg *models.Message, text string) {
 		if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
 			ChatID:          msg.Chat.ID,
@@ -159,6 +162,148 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, logger *slog.Logg
 				return
 			}
 			reply(ctx, msg, "Триггер-фразы этого чата:\n— "+strings.Join(phrases, "\n— "))
+		},
+	)
+
+	// /blockdomain, /unblockdomain, /domains — ручное управление глобальным
+	// списком опасных доменов (internal/linkcheck), в дополнение к
+	// автоматическому обучению на банах. Список глобальный (как
+	// global_blacklist), поэтому доступен из любого чата — тот же принцип,
+	// что и у автообучения: бан в одном чате уже сейчас влияет на все
+	// остальные чаты бота.
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "blockdomain", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Проверка ссылок недоступна: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			domain := strings.ToLower(strings.TrimSpace(commandArgument(msg)))
+			domain = strings.TrimPrefix(domain, "www.")
+			if domain == "" {
+				reply(ctx, msg, "Использование: /blockdomain <домен> (например: spam-casino.xyz)")
+				return
+			}
+
+			if err := store.LearnDomains(ctx, []string{domain}, "добавлено вручную через /blockdomain"); err != nil {
+				logger.Error("не удалось добавить домен", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось сохранить домен, попробуйте позже.")
+				return
+			}
+			reply(ctx, msg, fmt.Sprintf("Домен «%s» добавлен в глобальный список опасных.", domain))
+		},
+	)
+
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "unblockdomain", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Проверка ссылок недоступна: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			domain := commandArgument(msg)
+			if domain == "" {
+				reply(ctx, msg, "Использование: /unblockdomain <домен>")
+				return
+			}
+
+			removed, err := store.RemoveDomain(ctx, domain)
+			if err != nil {
+				logger.Error("не удалось удалить домен", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось удалить домен, попробуйте позже.")
+				return
+			}
+			if !removed {
+				reply(ctx, msg, fmt.Sprintf("«%s» и не было в списке опасных.", domain))
+				return
+			}
+			reply(ctx, msg, fmt.Sprintf("Домен «%s» удалён из глобального списка опасных.", domain))
+		},
+	)
+
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "domains", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Проверка ссылок недоступна: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			const recentLimit = 30
+			domains, err := store.ListRecentDomains(ctx, recentLimit)
+			if err != nil {
+				logger.Error("не удалось получить список опасных доменов", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось получить список, попробуйте позже.")
+				return
+			}
+			if len(domains) == 0 {
+				reply(ctx, msg, "Глобальный список опасных доменов пуст.")
+				return
+			}
+			reply(ctx, msg, fmt.Sprintf("Последние опасные домены (до %d, список общий для всех чатов):\n— %s",
+				recentLimit, strings.Join(domains, "\n— ")))
+		},
+	)
+
+	// /ban — ручной бан администратором чата, в ответ (reply) на сообщение
+	// спамера. В отличие от автоматических уровней обороны (rate-limit,
+	// триггер-слова, глобальный ЧС), это единственный способ научить бота
+	// на спам, который он сам не отловил (например, ссылка на ещё
+	// неизвестный домен или разовое сообщение, не подпадающее под флуд).
+	// BanSpammer банит и одновременно обучает те же global_blacklist и
+	// bad_domains, что и автоматический бан за флуд/жалобы — отдельно
+	// ничего обучать не нужно, d.BanSpammer уже делает всё через ban().
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "ban", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			target := msg.ReplyToMessage
+			if target == nil || target.From == nil {
+				reply(ctx, msg, "Команду /ban нужно отправить в ответ (reply) на сообщение спамера.")
+				return
+			}
+			if target.From.IsBot {
+				reply(ctx, msg, "Нельзя забанить бота.")
+				return
+			}
+			if target.From.ID == msg.From.ID {
+				reply(ctx, msg, "Нельзя забанить самого себя.")
+				return
+			}
+
+			logger.Info("ручной бан администратором",
+				"admin_id", msg.From.ID, "spammer_id", target.From.ID, "chat_id", msg.Chat.ID)
+
+			// Уведомление о бане (если не SILENT_BAN) отправляет само
+			// d.BanSpammer/ban — второе сообщение здесь не нужно и
+			// дублировало бы его.
+			d.BanSpammer(ctx, msg.Chat.ID, target.ID, target.From.ID, target.From.Username, target.Text)
 		},
 	)
 }
