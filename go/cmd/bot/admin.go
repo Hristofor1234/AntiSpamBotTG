@@ -10,6 +10,7 @@ import (
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/corewords"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/dispatcher"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
 )
@@ -159,6 +160,60 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 				return
 			}
 			reply(ctx, msg, "Триггер-фразы этого чата:\n— "+strings.Join(phrases, "\n— "))
+		},
+	)
+
+	// /addcorewords — быстро наполнить фильтр слов текущего чата встроенной
+	// категорией (internal/corewords), не вводя каждое слово вручную через
+	// /addspam. Ядро неизменно и живёт в коде; сами слова после добавления
+	// хранятся как обычные записи chat_triggers этого чата — их можно
+	// убрать через /removespam, как и любую другую фразу.
+	b.RegisterHandler(tgbot.HandlerTypeMessageText, "addcorewords", tgbot.MatchTypeCommand,
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Фильтр по словам недоступен: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			category := strings.ToLower(strings.TrimSpace(commandArgument(msg)))
+			if category == "" {
+				reply(ctx, msg, fmt.Sprintf(
+					"Использование: /addcorewords <категория>\nДоступные категории: %s, all",
+					strings.Join(corewords.Order, ", "),
+				))
+				return
+			}
+
+			var words []string
+			if category == "all" {
+				for _, name := range corewords.Order {
+					words = append(words, corewords.Categories[name]...)
+				}
+			} else if list, ok := corewords.Categories[category]; ok {
+				words = list
+			} else {
+				reply(ctx, msg, fmt.Sprintf(
+					"Неизвестная категория «%s». Доступные: %s, all",
+					category, strings.Join(corewords.Order, ", "),
+				))
+				return
+			}
+
+			for _, word := range words {
+				if err := store.AddTrigger(ctx, msg.Chat.ID, word); err != nil {
+					logger.Error("не удалось добавить слово из ядра", "error", err, "chat_id", msg.Chat.ID, "word", word)
+					reply(ctx, msg, "Не удалось добавить часть слов, попробуйте позже.")
+					return
+				}
+			}
+			reply(ctx, msg, fmt.Sprintf("Добавлено %d слов из категории «%s» (уже существовавшие пропущены).", len(words), category))
 		},
 	)
 

@@ -26,6 +26,7 @@ func registerBotCommands(ctx context.Context, b *tgbot.Bot, logger *slog.Logger)
 		{Command: "addspam", Description: "Добавить слово-триггер"},
 		{Command: "removespam", Description: "Удалить слово-триггер"},
 		{Command: "triggers", Description: "Список триггеров чата"},
+		{Command: "addcorewords", Description: "Добавить встроенную категорию слов"},
 		{Command: "blockdomain", Description: "Заблокировать домен"},
 		{Command: "unblockdomain", Description: "Разблокировать домен"},
 		{Command: "domains", Description: "Список опасных доменов"},
