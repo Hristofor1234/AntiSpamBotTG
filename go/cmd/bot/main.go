@@ -143,6 +143,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Подсказки команд при вводе "/" в Telegram — отдельный список для групп
+	// (все команды) и личных чатов (только /start, /help).
+	registerBotCommands(ctx, b, logger)
+
 	mode := "Long Polling"
 	if cfg.WebhookURL != "" {
 		mode = "Webhook"
@@ -157,7 +161,7 @@ func main() {
 		if update.Message == nil {
 			return
 		}
-		sendHelp(ctx, b, update.Message.Chat.ID, cfg, mode, dbConnected, logger)
+		sendHelp(ctx, b, update.Message, cfg, mode, dbConnected, logger)
 	}
 
 	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand, helpHandler)
@@ -177,22 +181,17 @@ func main() {
 
 			target := msg.ReplyToMessage
 			if target == nil || target.From == nil {
-				_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
-					ChatID:          msg.Chat.ID,
-					Text:            "Команду /report нужно отправить в ответ (reply) на сообщение, которое считаете спамом.",
-					ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
-				})
+				sendAndScheduleDelete(ctx, b, msg,
+					"Команду /report нужно отправить в ответ (reply) на сообщение, которое считаете спамом.",
+					"", cfg.AutoDeleteDelay, logger)
 				return
 			}
 			if target.From.IsBot {
 				return
 			}
 			if target.From.ID == msg.From.ID {
-				_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
-					ChatID:          msg.Chat.ID,
-					Text:            "Нельзя пожаловаться на собственное сообщение.",
-					ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
-				})
+				sendAndScheduleDelete(ctx, b, msg, "Нельзя пожаловаться на собственное сообщение.",
+					"", cfg.AutoDeleteDelay, logger)
 				return
 			}
 
@@ -205,11 +204,9 @@ func main() {
 				return
 			}
 
-			_, _ = b.SendMessage(ctx, &tgbot.SendMessageParams{
-				ChatID:          msg.Chat.ID,
-				Text:            fmt.Sprintf("Жалоба принята (%d/%d).", count, cfg.ReportThreshold),
-				ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
-			})
+			sendAndScheduleDelete(ctx, b, msg,
+				fmt.Sprintf("Жалоба принята (%d/%d).", count, cfg.ReportThreshold),
+				"", cfg.AutoDeleteDelay, logger)
 		},
 	)
 
@@ -227,7 +224,7 @@ func main() {
 
 	// /addspam, /removespam, /triggers, /blockdomain, /unblockdomain,
 	// /domains, /ban — административные команды, для текущего чата.
-	registerAdminHandlers(b, store, d, logger)
+	registerAdminHandlers(b, store, d, cfg.AutoDeleteDelay, logger)
 
 	logger.Info("бот запущен",
 		"mode", mode,

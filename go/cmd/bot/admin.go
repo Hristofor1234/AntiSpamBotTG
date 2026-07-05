@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -41,16 +42,12 @@ func commandArgument(msg *models.Message) string {
 // /removespam, /triggers, /blockdomain, /unblockdomain, /domains (требуют
 // подключённой PostgreSQL — без неё отвечают понятным сообщением, а не
 // молчат) и /ban (работает и без БД — обучение при бане просто не
-// произойдёт, см. internal/dispatcher.ban).
-func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dispatcher, logger *slog.Logger) {
+// произойдёт, см. internal/dispatcher.ban). autoDeleteDelay — через сколько
+// удалять и саму команду, и ответ бота в групповых чатах (0 — не удалять),
+// см. autodelete.go.
+func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dispatcher, autoDeleteDelay time.Duration, logger *slog.Logger) {
 	reply := func(ctx context.Context, msg *models.Message, text string) {
-		if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
-			ChatID:          msg.Chat.ID,
-			Text:            text,
-			ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
-		}); err != nil {
-			logger.Error("не удалось ответить на admin-команду", "error", err, "chat_id", msg.Chat.ID)
-		}
+		sendAndScheduleDelete(ctx, b, msg, text, "", autoDeleteDelay, logger)
 	}
 
 	// requireAdmin возвращает true, если можно продолжать обработку команды

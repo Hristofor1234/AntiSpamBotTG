@@ -61,6 +61,11 @@ type Config struct {
 	// — считается ботом и удаляется из чата (кик, не постоянный бан).
 	CaptchaEnabled bool
 	CaptchaTimeout time.Duration
+
+	// AutoDeleteDelay — через сколько после отправки удалять команду
+	// администратора и ответ бота в групповых чатах (не в личных — там
+	// удаление мешало бы обычной переписке). 0 отключает автоудаление.
+	AutoDeleteDelay time.Duration
 }
 
 // Getenv — минимальный интерфейс над os.Getenv, чтобы Load был тестируемым.
@@ -165,6 +170,14 @@ func Load(getenv Getenv) (*Config, error) {
 		return nil, fmt.Errorf("CAPTCHA_TIMEOUT_SECONDS должен быть положительным числом, получено %d", captchaTimeoutSec)
 	}
 
+	autoDeleteDelaySec, err := intEnv(getenv, "AUTO_DELETE_DELAY_SECONDS", 30)
+	if err != nil {
+		return nil, err
+	}
+	if autoDeleteDelaySec < 0 {
+		return nil, fmt.Errorf("AUTO_DELETE_DELAY_SECONDS не может быть отрицательным, получено %d", autoDeleteDelaySec)
+	}
+
 	return &Config{
 		BotToken:        token,
 		RateLimitCount:  rateLimitCount,
@@ -186,6 +199,8 @@ func Load(getenv Getenv) (*Config, error) {
 
 		CaptchaEnabled: captchaEnabled,
 		CaptchaTimeout: time.Duration(captchaTimeoutSec) * time.Second,
+
+		AutoDeleteDelay: time.Duration(autoDeleteDelaySec) * time.Second,
 	}, nil
 }
 
