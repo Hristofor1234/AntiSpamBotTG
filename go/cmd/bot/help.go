@@ -54,7 +54,7 @@ func sendHelp(ctx context.Context, b *tgbot.Bot, msg *models.Message, cfg *confi
 			"• /addspam <слово> — добавить триггер-фразу\n"+
 			"• /removespam <слово> — убрать триггер-фразу\n"+
 			"• /triggers — список триггер-фраз этого чата\n"+
-			"• /addcorewords <категория> — добавить встроенный набор слов (mat, insults, spam, all)\n"+
+			"• /addcorewords <категория> — добавить встроенный набор слов (mat, insults, spam, scam, all)\n"+
 			"• /blockdomain <домен> — добавить домен в опасные\n"+
 			"• /unblockdomain <домен> — убрать домен из опасных\n"+
 			"• /domains — последние опасные домены (общий список)\n\n"+
