@@ -9,39 +9,43 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
-// adminCacheTTL — как долго доверяем списку админов чата, прежде чем
-// перезапросить его у Telegram заново. Админы меняются редко, а
-// GetChatAdministrators дороже, чем проверка одной map — поэтому кэшируем,
-// а не спрашиваем Telegram на каждое сообщение.
-const adminCacheTTL = 5 * time.Minute
+// ownerCacheTTL — как долго доверяем ID владельца чата, прежде чем
+// перезапросить его у Telegram заново. Владелец меняется только при передаче
+// прав в самом Telegram (крайне редко), а GetChatAdministrators дороже, чем
+// сравнение одного int64 — поэтому кэшируем, а не спрашиваем на каждое
+// сообщение.
+const ownerCacheTTL = 5 * time.Minute
 
-type adminCacheEntry struct {
-	ids       map[int64]struct{}
+type ownerCacheEntry struct {
+	ownerID   int64
+	found     bool
 	expiresAt time.Time
 }
 
-// adminGuard хранит закэшированные списки админов/владельца по чатам —
-// нужно, чтобы автоматические уровни обороны (флуд, глобальный ЧС, опасные
-// домены, триггер-слова) никогда не пытались забанить админа или владельца
-// чата. Telegram и так не даст забанить владельца (вернёт ошибку "can't
-// remove chat owner"), но без этой проверки бот на каждый флуд от владельца
-// будет молча удалять его сообщение и получать одну и ту же бесполезную
-// ошибку — а обычного админа, которого забанить технически можно,
-// действительно забанит, что тоже нежелательно для автоматической модерации.
-type adminGuard struct {
+// ownerGuard хранит закэшированный ID владельца по чатам — нужно только для
+// того, чтобы бан (см. Dispatcher.ban) не пытался забанить владельца чата:
+// Telegram и так вернёт ошибку "can't remove chat owner" на banChatMember,
+// так что бессмысленный API-вызов и повторяющуюся ошибку в логах на каждое
+// срабатывание проще пропустить заранее, зная ID владельца.
+//
+// Обычные администраторы чата под эту проверку не подпадают: все уровни
+// автомодерации (флуд, глобальный ЧС, опасные домены, триггер-слова)
+// применяются к ним наравне с остальными участниками, и забанить их бот
+// технически может — это осознанное поведение, не баг.
+type ownerGuard struct {
 	mu      sync.Mutex
-	entries map[int64]adminCacheEntry
+	entries map[int64]ownerCacheEntry
 }
 
-func newAdminGuard() *adminGuard {
-	return &adminGuard{entries: make(map[int64]adminCacheEntry)}
+func newOwnerGuard() *ownerGuard {
+	return &ownerGuard{entries: make(map[int64]ownerCacheEntry)}
 }
 
-// isProtected — является ли userID админом или владельцем чата chatID.
-// При ошибке запроса к Telegram считаем, что не защищён (fail-open) —
-// как и остальные проверки в processUpdate, ошибка внешнего сервиса не
-// должна блокировать модерацию, а её причина сама попадёт в лог.
-func (g *adminGuard) isProtected(ctx context.Context, b *tgbot.Bot, chatID, userID int64) bool {
+// isOwner — является ли userID владельцем чата chatID. При ошибке запроса к
+// Telegram считаем, что не владелец (fail-open) — как и остальные проверки в
+// processUpdate, ошибка внешнего сервиса не должна блокировать модерацию, а
+// её причина сама попадёт в лог через withRetry в самом ban().
+func (g *ownerGuard) isOwner(ctx context.Context, b *tgbot.Bot, chatID, userID int64) bool {
 	g.mu.Lock()
 	entry, ok := g.entries[chatID]
 	g.mu.Unlock()
@@ -52,36 +56,19 @@ func (g *adminGuard) isProtected(ctx context.Context, b *tgbot.Bot, chatID, user
 			return false
 		}
 
-		ids := make(map[int64]struct{}, len(members))
+		entry = ownerCacheEntry{expiresAt: time.Now().Add(ownerCacheTTL)}
 		for _, m := range members {
-			if id, ok := chatMemberUserID(m); ok {
-				ids[id] = struct{}{}
+			if m.Type == models.ChatMemberTypeOwner && m.Owner != nil && m.Owner.User != nil {
+				entry.ownerID = m.Owner.User.ID
+				entry.found = true
+				break
 			}
 		}
 
-		entry = adminCacheEntry{ids: ids, expiresAt: time.Now().Add(adminCacheTTL)}
 		g.mu.Lock()
 		g.entries[chatID] = entry
 		g.mu.Unlock()
 	}
 
-	_, protected := entry.ids[userID]
-	return protected
-}
-
-// chatMemberUserID достаёт ID пользователя из ChatMember — GetChatAdministrators
-// возвращает только владельца и администраторов, поэтому проверяем только эти
-// два случая (остальные ветки ChatMember сюда прийти не должны).
-func chatMemberUserID(m models.ChatMember) (int64, bool) {
-	switch m.Type {
-	case models.ChatMemberTypeOwner:
-		if m.Owner != nil && m.Owner.User != nil {
-			return m.Owner.User.ID, true
-		}
-	case models.ChatMemberTypeAdministrator:
-		if m.Administrator != nil {
-			return m.Administrator.User.ID, true
-		}
-	}
-	return 0, false
+	return entry.found && entry.ownerID == userID
 }

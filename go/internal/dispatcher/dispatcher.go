@@ -58,10 +58,11 @@ type Dispatcher struct {
 	// допускается, прежде чем бан вместо очередного предупреждения.
 	warnThreshold int
 
-	// admins — кэш админов/владельцев чатов (см. adminguard.go): ни один
-	// автоматический уровень обороны не должен пытаться забанить админа
-	// или владельца чата.
-	admins *adminGuard
+	// owners — кэш владельцев чатов (см. adminguard.go): используется только
+	// в ban(), чтобы не пытаться забанить владельца чата — Telegram всё равно
+	// откажет. На обычных админов не влияет: они проверяются автомодерацией
+	// наравне со всеми.
+	owners *ownerGuard
 
 	wg sync.WaitGroup
 }
@@ -78,7 +79,7 @@ func New(workerCount, queueSize int, limiter *ratelimit.Limiter, b *tgbot.Bot, s
 		store:         store,
 		silent:        silent,
 		warnThreshold: warnThreshold,
-		admins:        newAdminGuard(),
+		owners:        newOwnerGuard(),
 		logger:        logger,
 	}
 }
@@ -126,14 +127,10 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 	}
 }
 
-// processUpdate — уровни обороны от спама, по возрастанию "стоимости":
-//  0. админ или владелец чата — автоматическая модерация полностью
-//     пропускается (см. adminguard.go): ни рейт-лимит, ни глобальный ЧС,
-//     ни триггер-слова не должны банить того, кто управляет чатом. Telegram
-//     и так не даст забанить владельца, но без этой проверки бот на каждый
-//     флуд от него будет впустую удалять сообщение и получать одну и ту же
-//     ошибку "can't remove chat owner", а обычного админа — технически
-//     забанить может, что для автоматической модерации тоже нежелательно;
+// processUpdate — уровни обороны от спама, по возрастанию "стоимости".
+// Проверяются все участники без исключений, включая обычных админов чата —
+// от бана освобождён только владелец чата, и то лишь на уровне самого
+// вызова Telegram API (см. ban()), а не пропуском проверок целиком:
 //  1. глобальный чёрный список (PostgreSQL, если подключена) — мгновенный
 //     отсев уже выученного спама, независимо от истории конкретного чата;
 //  2. известные опасные домены (PostgreSQL, если подключена) — ссылки на
@@ -147,12 +144,6 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 //     ссылок в нём) уходят в обучение — в следующий раз тот же спам поймает
 //     уже уровень 1 или 2, в любом чате, где стоит бот.
 func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
-	if d.admins.isProtected(ctx, d.bot, u.ChatID, u.UserID) {
-		d.logger.Info("сообщение от админа/владельца чата, автомодерация пропущена",
-			"user_id", u.UserID, "chat_id", u.ChatID)
-		return
-	}
-
 	if d.store != nil && u.Text != "" {
 		known, err := d.store.IsKnownSpam(ctx, u.Text)
 		switch {
@@ -294,6 +285,18 @@ func (d *Dispatcher) ban(ctx context.Context, u Update, learn bool) {
 	}); err != nil {
 		d.logger.Error("не удалось удалить сообщение флудера",
 			"error", err, "chat_id", u.ChatID, "message_id", u.MessageID)
+	}
+
+	// Владельца чата забанить нельзя в принципе — Telegram ответит "can't
+	// remove chat owner" на любую попытку. Сообщение уже удалено выше; на
+	// этом для владельца всё — не шлём заведомо обречённый API-запрос и не
+	// учим глобальный список на его тексте (с высокой вероятностью это его
+	// собственный тест фильтра, а не реальный спам). Обычных админов эта
+	// проверка не касается — их banChatMember отрабатывает как обычно.
+	if d.owners.isOwner(ctx, d.bot, u.ChatID, u.UserID) {
+		d.logger.Info("владелец чата: бан пропущен (Telegram не позволяет), сообщение удалено",
+			"chat_id", u.ChatID, "user_id", u.UserID)
+		return
 	}
 
 	// RevokeMessages: true — Telegram сам удаляет все недавние сообщения
