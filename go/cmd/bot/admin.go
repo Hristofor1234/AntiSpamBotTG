@@ -72,7 +72,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 		return true
 	}
 
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "addspam", tgbot.MatchTypeCommand,
+	registerCommand(b, "addspam",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -101,7 +101,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 		},
 	)
 
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "removespam", tgbot.MatchTypeCommand,
+	registerCommand(b, "removespam",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -135,7 +135,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 		},
 	)
 
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "triggers", tgbot.MatchTypeCommand,
+	registerCommand(b, "triggers",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -168,7 +168,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 	// /addspam. Ядро неизменно и живёт в коде; сами слова после добавления
 	// хранятся как обычные записи chat_triggers этого чата — их можно
 	// убрать через /removespam, как и любую другую фразу.
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "addcorewords", tgbot.MatchTypeCommand,
+	registerCommand(b, "addcorewords",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -223,7 +223,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 	// global_blacklist), поэтому доступен из любого чата — тот же принцип,
 	// что и у автообучения: бан в одном чате уже сейчас влияет на все
 	// остальные чаты бота.
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "blockdomain", tgbot.MatchTypeCommand,
+	registerCommand(b, "blockdomain",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -253,7 +253,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 		},
 	)
 
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "unblockdomain", tgbot.MatchTypeCommand,
+	registerCommand(b, "unblockdomain",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -287,7 +287,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 		},
 	)
 
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "domains", tgbot.MatchTypeCommand,
+	registerCommand(b, "domains",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {
@@ -325,7 +325,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 	// BanSpammer банит и одновременно обучает те же global_blacklist и
 	// bad_domains, что и автоматический бан за флуд/жалобы — отдельно
 	// ничего обучать не нужно, d.BanSpammer уже делает всё через ban().
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "ban", tgbot.MatchTypeCommand,
+	registerCommand(b, "ban",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil {

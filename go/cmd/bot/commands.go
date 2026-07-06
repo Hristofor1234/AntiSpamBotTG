@@ -3,10 +3,56 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
+
+// commandMatcher возвращает tgbot.MatchFunc, который матчит команду и без,
+// и с явным "@ИмяБота" — например "/start" и "/start@AntiSpamBotTG_bot".
+//
+// Встроенный tgbot.MatchTypeCommand так не умеет: он сравнивает подстроку
+// команды из entity буквально с pattern, включая "@ИмяБота", если он есть в
+// тексте сообщения (см. исходник handlers.go библиотеки: сравнение идёт по
+// data[e.Offset+1:e.Offset+e.Length], а не по части до "@"). Из-за этого
+// команды с явно указанным именем бота — обычное дело в группах, особенно
+// если ботов несколько, а Telegram сам подставляет "@ИмяБота" в
+// автоподсказке — никогда не совпадали с зарегистрированными хендлерами и
+// молча проваливались в defaultHandler, откуда шли в антиспам-конвейер как
+// обычный текст, без всякого ответа.
+func commandMatcher(command string) tgbot.MatchFunc {
+	return func(update *models.Update) bool {
+		if update.Message == nil {
+			return false
+		}
+		text := update.Message.Text
+		for _, e := range update.Message.Entities {
+			if e.Type != models.MessageEntityTypeBotCommand {
+				continue
+			}
+			if e.Offset < 0 || e.Length <= 0 || e.Offset+e.Length > len(text) {
+				continue
+			}
+
+			cmd := text[e.Offset+1 : e.Offset+e.Length]
+			if at := strings.IndexByte(cmd, '@'); at != -1 {
+				cmd = cmd[:at]
+			}
+			if cmd == command {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// registerCommand регистрирует текстовую команду command (без "/") —
+// см. commandMatcher про то, почему это не tgbot.RegisterHandler с
+// tgbot.MatchTypeCommand.
+func registerCommand(b *tgbot.Bot, command string, handler tgbot.HandlerFunc) {
+	b.RegisterHandlerMatchFunc(commandMatcher(command), handler)
+}
 
 // registerBotCommands регистрирует список команд для автодополнения в
 // Telegram (подсказки при вводе "/"). Группы получают полный список — в том

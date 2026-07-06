@@ -164,15 +164,15 @@ func main() {
 		sendHelp(ctx, b, update.Message, cfg, mode, dbConnected, logger)
 	}
 
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "start", tgbot.MatchTypeCommand, helpHandler)
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "help", tgbot.MatchTypeCommand, helpHandler)
+	registerCommand(b, "start", helpHandler)
+	registerCommand(b, "help", helpHandler)
 
 	// /report — обучение через жалобы сообщества: отправляется в ответ
 	// (reply) на подозрительное сообщение. Как только на одно и то же
 	// сообщение пожалуются cfg.ReportThreshold разных пользователей, автор
 	// банится, а текст уходит в глобальное обучение — так же, как при бане
 	// за флуд (см. dispatcher.BanSpammer).
-	b.RegisterHandler(tgbot.HandlerTypeMessageText, "report", tgbot.MatchTypeCommand,
+	registerCommand(b, "report",
 		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
 			msg := update.Message
 			if msg == nil || msg.From == nil {
