@@ -8,11 +8,17 @@ import (
 	"time"
 )
 
+type key struct {
+	ChatID int64
+	UserID int64
+}
+
 // Limiter отслеживает временные метки последних сообщений каждого
-// пользователя и решает, не превышен ли лимит "limit сообщений за window".
+// пользователя в каждом чате и решает, не превышен ли лимит "limit
+// сообщений за window".
 type Limiter struct {
 	mu      sync.Mutex
-	records map[int64][]time.Time
+	records map[key][]time.Time
 	limit   int
 	window  time.Duration
 }
@@ -20,30 +26,32 @@ type Limiter struct {
 // New создаёт лимитер: не более limit сообщений за window.
 func New(limit int, window time.Duration) *Limiter {
 	return &Limiter{
-		records: make(map[int64][]time.Time),
+		records: make(map[key][]time.Time),
 		limit:   limit,
 		window:  window,
 	}
 }
 
-// Allow регистрирует очередное сообщение от userID и возвращает false,
-// если пользователь превысил лимит сообщений за окно времени (флуд).
+// Allow регистрирует очередное сообщение от userID в chatID и возвращает
+// false, если пользователь превысил лимит сообщений за окно времени
+// именно в этом чате (флуд).
 // Безопасен для конкурентного вызова из нескольких воркеров.
-func (l *Limiter) Allow(userID int64) bool {
+func (l *Limiter) Allow(chatID, userID int64) bool {
 	now := time.Now()
 	cutoff := now.Add(-l.window)
+	k := key{ChatID: chatID, UserID: userID}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	fresh := filterAfter(l.records[userID], cutoff)
+	fresh := filterAfter(l.records[k], cutoff)
 
 	if len(fresh) >= l.limit {
-		l.records[userID] = fresh
+		l.records[k] = fresh
 		return false
 	}
 
-	l.records[userID] = append(fresh, now)
+	l.records[k] = append(fresh, now)
 	return true
 }
 
@@ -71,9 +79,9 @@ func (l *Limiter) cleanup() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	for userID, history := range l.records {
+	for k, history := range l.records {
 		if len(filterAfter(history, cutoff)) == 0 {
-			delete(l.records, userID)
+			delete(l.records, k)
 		}
 	}
 }

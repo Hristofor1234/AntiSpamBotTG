@@ -77,6 +77,19 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 			sample_text TEXT NOT NULL,
 			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+
+		CREATE TABLE IF NOT EXISTS chat_content_filter_settings (
+			chat_id BIGINT PRIMARY KEY,
+			mode    TEXT NOT NULL DEFAULT ''
+		);
+
+		CREATE TABLE IF NOT EXISTS chat_content_filter_allowlist (
+			chat_id    BIGINT NOT NULL,
+			phrase     TEXT NOT NULL,
+			raw_phrase TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (chat_id, phrase)
+		);
 	`
 	if _, err := pool.Exec(ctx, migration); err != nil {
 		pool.Close()
@@ -336,6 +349,107 @@ func (s *Store) ResetWarnings(ctx context.Context, chatID, userID int64) error {
 	const query = `DELETE FROM warnings WHERE chat_id = $1 AND user_id = $2`
 	_, err := s.pool.Exec(ctx, query, chatID, userID)
 	return err
+}
+
+// SetChatContentFilterMode сохраняет режим встроенного фильтра плохого
+// контекста для конкретного чата. Поддерживаются:
+//   - "" / "default" — использовать глобальный режим из .env
+//   - "off" — отключить встроенный фильтр для этого чата
+//   - "delete" — только удалять сообщения
+//   - "ban" — удалять и банить автора
+func (s *Store) SetChatContentFilterMode(ctx context.Context, chatID int64, mode string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "", "default":
+		mode = ""
+	case "off", "delete", "ban":
+	default:
+		return fmt.Errorf("неподдерживаемый режим фильтра: %q", mode)
+	}
+
+	const query = `
+		INSERT INTO chat_content_filter_settings (chat_id, mode)
+		VALUES ($1, $2)
+		ON CONFLICT (chat_id) DO UPDATE SET mode = EXCLUDED.mode
+	`
+	_, err := s.pool.Exec(ctx, query, chatID, mode)
+	return err
+}
+
+// GetChatContentFilterMode возвращает режим встроенного фильтра плохого
+// контекста для чата. Пустая строка означает "использовать глобальный
+// дефолт из .env".
+func (s *Store) GetChatContentFilterMode(ctx context.Context, chatID int64) (string, error) {
+	const query = `SELECT mode FROM chat_content_filter_settings WHERE chat_id = $1`
+
+	var mode string
+	err := s.pool.QueryRow(ctx, query, chatID).Scan(&mode)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return mode, nil
+}
+
+// AddContentFilterAllow добавляет фразу в allowlist встроенного фильтра
+// плохого контекста для конкретного чата.
+func (s *Store) AddContentFilterAllow(ctx context.Context, chatID int64, phrase string) error {
+	normalized := normalizeText(phrase)
+	if normalized == "" {
+		return fmt.Errorf("пустая фраза после нормализации")
+	}
+
+	const query = `
+		INSERT INTO chat_content_filter_allowlist (chat_id, phrase, raw_phrase)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (chat_id, phrase) DO NOTHING
+	`
+	_, err := s.pool.Exec(ctx, query, chatID, normalized, phrase)
+	return err
+}
+
+// RemoveContentFilterAllow удаляет фразу из allowlist встроенного фильтра
+// плохого контекста чата.
+func (s *Store) RemoveContentFilterAllow(ctx context.Context, chatID int64, phrase string) (removed bool, err error) {
+	normalized := normalizeText(phrase)
+	if normalized == "" {
+		return false, nil
+	}
+
+	const query = `DELETE FROM chat_content_filter_allowlist WHERE chat_id = $1 AND phrase = $2`
+	tag, err := s.pool.Exec(ctx, query, chatID, normalized)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ListContentFilterAllow возвращает allowlist встроенного фильтра плохого
+// контекста для чата в исходном виде.
+func (s *Store) ListContentFilterAllow(ctx context.Context, chatID int64) ([]string, error) {
+	const query = `
+		SELECT raw_phrase
+		FROM chat_content_filter_allowlist
+		WHERE chat_id = $1
+		ORDER BY raw_phrase
+	`
+	rows, err := s.pool.Query(ctx, query, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var phrases []string
+	for rows.Next() {
+		var phrase string
+		if err := rows.Scan(&phrase); err != nil {
+			return nil, err
+		}
+		phrases = append(phrases, phrase)
+	}
+	return phrases, rows.Err()
 }
 
 // pingWithRetry повторяет Ping с паузой, пока PostgreSQL не станет доступен

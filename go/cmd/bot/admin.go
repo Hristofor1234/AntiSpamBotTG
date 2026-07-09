@@ -163,6 +163,146 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 		},
 	)
 
+	// /contextmode — режим встроенного фильтра плохого контекста для
+	// текущего чата. Требует PostgreSQL, потому что настройка хранится
+	// отдельно для каждого чата:
+	//   ban     — удалить сообщение и забанить автора
+	//   delete  — только удалить сообщение
+	//   off     — отключить встроенный фильтр в этом чате
+	//   default — вернуть глобальное поведение из .env
+	registerCommand(b, "contextmode",
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Настройка встроенного фильтра недоступна: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			mode := strings.ToLower(strings.TrimSpace(commandArgument(msg)))
+			if mode == "" {
+				current, err := store.GetChatContentFilterMode(ctx, msg.Chat.ID)
+				if err != nil {
+					logger.Error("не удалось получить режим встроенного фильтра", "error", err, "chat_id", msg.Chat.ID)
+					reply(ctx, msg, "Не удалось получить текущий режим, попробуйте позже.")
+					return
+				}
+				if current == "" {
+					current = "default"
+				}
+				reply(ctx, msg, "Текущий режим встроенного фильтра этого чата: "+current+
+					"\nИспользование: /contextmode <ban|delete|off|default>")
+				return
+			}
+
+			if err := store.SetChatContentFilterMode(ctx, msg.Chat.ID, mode); err != nil {
+				logger.Error("не удалось сохранить режим встроенного фильтра", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось сохранить режим, попробуйте позже.")
+				return
+			}
+			reply(ctx, msg, fmt.Sprintf("Режим встроенного фильтра для этого чата: %s", mode))
+		},
+	)
+
+	// /allowcontext, /unallowcontext, /allowcontexts — allowlist встроенного
+	// фильтра плохого контекста для текущего чата. Нужен, чтобы в чате можно
+	// было разрешить свои легитимные фразы, похожие по форме на спам.
+	registerCommand(b, "allowcontext",
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Allowlist встроенного фильтра недоступен: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			phrase := commandArgument(msg)
+			if phrase == "" {
+				reply(ctx, msg, "Использование: /allowcontext <слово или фраза>")
+				return
+			}
+
+			if err := store.AddContentFilterAllow(ctx, msg.Chat.ID, phrase); err != nil {
+				logger.Error("не удалось добавить исключение встроенного фильтра", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось сохранить исключение, попробуйте позже.")
+				return
+			}
+			reply(ctx, msg, fmt.Sprintf("Добавлено исключение для встроенного фильтра: «%s»", phrase))
+		},
+	)
+
+	registerCommand(b, "unallowcontext",
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Allowlist встроенного фильтра недоступен: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			phrase := commandArgument(msg)
+			if phrase == "" {
+				reply(ctx, msg, "Использование: /unallowcontext <слово или фраза>")
+				return
+			}
+
+			removed, err := store.RemoveContentFilterAllow(ctx, msg.Chat.ID, phrase)
+			if err != nil {
+				logger.Error("не удалось удалить исключение встроенного фильтра", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось удалить исключение, попробуйте позже.")
+				return
+			}
+			if !removed {
+				reply(ctx, msg, fmt.Sprintf("«%s» и не было в allowlist встроенного фильтра.", phrase))
+				return
+			}
+			reply(ctx, msg, fmt.Sprintf("Исключение удалено: «%s»", phrase))
+		},
+	)
+
+	registerCommand(b, "allowcontexts",
+		func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
+			msg := update.Message
+			if msg == nil {
+				return
+			}
+			if store == nil {
+				reply(ctx, msg, "Allowlist встроенного фильтра недоступен: не подключена PostgreSQL (DATABASE_URL).")
+				return
+			}
+			if !requireAdmin(ctx, msg) {
+				return
+			}
+
+			phrases, err := store.ListContentFilterAllow(ctx, msg.Chat.ID)
+			if err != nil {
+				logger.Error("не удалось получить allowlist встроенного фильтра", "error", err, "chat_id", msg.Chat.ID)
+				reply(ctx, msg, "Не удалось получить список, попробуйте позже.")
+				return
+			}
+			if len(phrases) == 0 {
+				reply(ctx, msg, "Allowlist встроенного фильтра для этого чата пуст.")
+				return
+			}
+			reply(ctx, msg, "Исключения встроенного фильтра этого чата:\n— "+strings.Join(phrases, "\n— "))
+		},
+	)
+
 	// /addcorewords — быстро наполнить фильтр слов текущего чата встроенной
 	// категорией (internal/corewords), не вводя каждое слово вручную через
 	// /addspam. Ядро неизменно и живёт в коде; сами слова после добавления
@@ -355,7 +495,7 @@ func registerAdminHandlers(b *tgbot.Bot, store *storage.Store, d *dispatcher.Dis
 			// Уведомление о бане (если не SILENT_BAN) отправляет само
 			// d.BanSpammer/ban — второе сообщение здесь не нужно и
 			// дублировало бы его.
-			d.BanSpammer(ctx, msg.Chat.ID, target.ID, target.From.ID, target.From.Username, target.Text)
+			d.BanSpammer(ctx, msg.Chat.ID, target.ID, target.From.ID, target.From.Username, messageModerationText(target))
 		},
 	)
 }

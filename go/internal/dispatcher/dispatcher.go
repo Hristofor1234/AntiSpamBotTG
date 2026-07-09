@@ -13,6 +13,7 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/contentfilter"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/linkcheck"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
@@ -58,6 +59,18 @@ type Dispatcher struct {
 	// допускается, прежде чем бан вместо очередного предупреждения.
 	warnThreshold int
 
+	// contentFilterEnabled — встроенный фильтр плохого контекста
+	// (скам/казино/интим + ссылка/контакт/призыв в ЛС). Не требует БД.
+	contentFilterEnabled bool
+
+	// contentFilterAction — реакция на встроенный фильтр плохого контекста:
+	// "ban" или "delete".
+	contentFilterAction string
+
+	// contentFilterAllowSubstrings — глобальные исключения для встроенного
+	// фильтра плохого контекста.
+	contentFilterAllowSubstrings []string
+
 	// owners — кэш владельцев чатов (см. adminguard.go): используется только
 	// в ban(), чтобы не пытаться забанить владельца чата — Telegram всё равно
 	// откажет. На обычных админов не влияет: они проверяются автомодерацией
@@ -67,20 +80,29 @@ type Dispatcher struct {
 	wg sync.WaitGroup
 }
 
+type contentFilterSettings struct {
+	Enabled         bool
+	Action          string
+	AllowSubstrings []string
+}
+
 // New создаёт диспетчер с workerCount воркерами и очередью на queueSize
 // обновлений. store может быть nil — тогда глобальное обучение и фильтр по
 // словам отключены, работает только rate-limit.
-func New(workerCount, queueSize int, limiter *ratelimit.Limiter, b *tgbot.Bot, store *storage.Store, silent bool, warnThreshold int, logger *slog.Logger) *Dispatcher {
+func New(workerCount, queueSize int, limiter *ratelimit.Limiter, b *tgbot.Bot, store *storage.Store, silent bool, warnThreshold int, contentFilterEnabled bool, contentFilterAction string, contentFilterAllowSubstrings []string, logger *slog.Logger) *Dispatcher {
 	return &Dispatcher{
-		workerCount:   workerCount,
-		jobQueue:      make(chan Update, queueSize),
-		limiter:       limiter,
-		bot:           b,
-		store:         store,
-		silent:        silent,
-		warnThreshold: warnThreshold,
-		owners:        newOwnerGuard(),
-		logger:        logger,
+		workerCount:          workerCount,
+		jobQueue:             make(chan Update, queueSize),
+		limiter:              limiter,
+		bot:                  b,
+		store:                store,
+		silent:               silent,
+		warnThreshold:        warnThreshold,
+		contentFilterEnabled: contentFilterEnabled,
+		contentFilterAction:  contentFilterAction,
+		contentFilterAllowSubstrings: contentFilterAllowSubstrings,
+		owners:               newOwnerGuard(),
+		logger:               logger,
 	}
 }
 
@@ -137,10 +159,12 @@ func (d *Dispatcher) worker(ctx context.Context, id int) {
 //     домены, встречавшиеся ранее в забаненных сообщениях (в любом чате),
 //     отсекаются даже если сам текст сообщения новый — см. internal/linkcheck;
 //  3. rate-limit (in-memory) — ловит новые, ещё не выученные вспышки флуда;
-//  4. триггер-слова чата (PostgreSQL, если подключена и админы что-то
+//  4. встроенный фильтр плохого контекста — типичный скам/казино/интим
+//     со ссылкой, @username или призывом писать в личку;
+//  5. триггер-слова чата (PostgreSQL, если подключена и админы что-то
 //     добавили через /addspam) — предупреждение, а после warnThreshold
 //     предупреждений подряд — бан;
-//  5. при бане по флуду или по накопленным предупреждениям текст (и домены
+//  6. при бане по флуду или по накопленным предупреждениям текст (и домены
 //     ссылок в нём) уходят в обучение — в следующий раз тот же спам поймает
 //     уже уровень 1 или 2, в любом чате, где стоит бот.
 func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
@@ -176,11 +200,36 @@ func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 		}
 	}
 
-	if !d.limiter.Allow(u.UserID) {
+	if !d.limiter.Allow(u.ChatID, u.UserID) {
 		d.logger.Warn("обнаружен флуд, бан пользователя",
 			"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID)
 		d.ban(ctx, u, true)
 		return
+	}
+
+	if u.Text != "" {
+		settings, err := d.resolveContentFilterSettings(ctx, u.ChatID)
+		if err != nil {
+			d.logger.Error("не удалось получить настройки встроенного фильтра плохого контекста, продолжаем с глобальными",
+				"error", err, "chat_id", u.ChatID)
+			settings = contentFilterSettings{
+				Enabled:         d.contentFilterEnabled,
+				Action:          d.contentFilterAction,
+				AllowSubstrings: d.contentFilterAllowSubstrings,
+			}
+		}
+		if settings.Enabled {
+			if reason, matched := contentfilter.MatchWithAllowlist(u.Text, settings.AllowSubstrings); matched {
+				d.logger.Warn("сообщение отфильтровано встроенным фильтром плохого контекста",
+					"user_id", u.UserID, "username", u.Username, "chat_id", u.ChatID, "reason", reason)
+				if settings.Action == "delete" {
+					d.deleteOnly(ctx, u, "⚠️ Сообщение удалено встроенным фильтром плохого контекста.")
+					return
+				}
+				d.ban(ctx, u, true)
+				return
+			}
+		}
 	}
 
 	if d.store != nil && u.Text != "" {
@@ -192,10 +241,63 @@ func (d *Dispatcher) processUpdate(ctx context.Context, u Update) {
 		case matched:
 			d.handleTriggerMatch(ctx, u, phrase)
 			return
+		default:
+			// Предупреждения считаются именно подряд: любое обычное
+			// сообщение без триггер-слов разрывает серию и сбрасывает
+			// счётчик для этого пользователя в этом чате.
+			if err := d.store.ResetWarnings(ctx, u.ChatID, u.UserID); err != nil {
+				d.logger.Error("не удалось сбросить счётчик предупреждений после обычного сообщения",
+					"error", err, "user_id", u.UserID, "chat_id", u.ChatID)
+			}
 		}
 	}
 
 	d.logger.Info("сообщение принято", "user_id", u.UserID, "chat_id", u.ChatID)
+}
+
+func (d *Dispatcher) resolveContentFilterSettings(ctx context.Context, chatID int64) (contentFilterSettings, error) {
+	settings := contentFilterSettings{
+		Enabled:         d.contentFilterEnabled,
+		Action:          d.contentFilterAction,
+		AllowSubstrings: append([]string(nil), d.contentFilterAllowSubstrings...),
+	}
+
+	if d.store == nil {
+		return settings, nil
+	}
+
+	mode, err := d.store.GetChatContentFilterMode(ctx, chatID)
+	if err != nil {
+		return settings, err
+	}
+	settings = applyContentFilterMode(settings, mode)
+
+	phrases, err := d.store.ListContentFilterAllow(ctx, chatID)
+	if err != nil {
+		return settings, err
+	}
+	settings = appendContentFilterAllowlist(settings, phrases)
+	return settings, nil
+}
+
+func applyContentFilterMode(settings contentFilterSettings, mode string) contentFilterSettings {
+	switch mode {
+	case "":
+	case "off":
+		settings.Enabled = false
+	case "delete":
+		settings.Enabled = true
+		settings.Action = "delete"
+	case "ban":
+		settings.Enabled = true
+		settings.Action = "ban"
+	}
+	return settings
+}
+
+func appendContentFilterAllowlist(settings contentFilterSettings, phrases []string) contentFilterSettings {
+	settings.AllowSubstrings = append(settings.AllowSubstrings, phrases...)
+	return settings
 }
 
 // handleTriggerMatch реагирует на совпадение с триггер-словом чата: сначала
@@ -263,6 +365,38 @@ func (d *Dispatcher) BanSpammer(ctx context.Context, chatID int64, messageID int
 		Username:  authorUsername,
 		Text:      text,
 	}, true)
+}
+
+// deleteOnly удаляет сообщение без бана пользователя. Нужен для более
+// мягкого режима встроенного фильтра плохого контекста, когда хотим
+// подчистить сомнительный контент, но не наказывать участника так же жёстко,
+// как за очевидный флуд или уже известный спам.
+func (d *Dispatcher) deleteOnly(ctx context.Context, u Update, notice string) {
+	if err := withRetry(ctx, d.logger, "deleteMessage", func() error {
+		_, err := d.bot.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
+			ChatID:    u.ChatID,
+			MessageID: u.MessageID,
+		})
+		return err
+	}); err != nil {
+		d.logger.Error("не удалось удалить сообщение встроенным фильтром",
+			"error", err, "chat_id", u.ChatID, "message_id", u.MessageID)
+		return
+	}
+
+	if d.silent || notice == "" {
+		return
+	}
+
+	if err := withRetry(ctx, d.logger, "sendMessage", func() error {
+		_, err := d.bot.SendMessage(ctx, &tgbot.SendMessageParams{
+			ChatID: u.ChatID,
+			Text:   notice,
+		})
+		return err
+	}); err != nil {
+		d.logger.Error("не удалось отправить уведомление об удалении", "error", err)
+	}
 }
 
 // ban удаляет сообщение и банит пользователя (с отзывом недавних сообщений в

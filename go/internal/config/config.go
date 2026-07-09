@@ -55,6 +55,22 @@ type Config struct {
 	// фильтр по словам отключён (см. main.go).
 	WarnThreshold int
 
+	// ContentFilterEnabled — встроенный эвристический фильтр "плохого
+	// контекста": типичный скам/казино/интим-спам со ссылкой, @username или
+	// призывом увести пользователя в личку. Не требует PostgreSQL и работает
+	// из коробки, дополняя rate-limit и ручные триггеры.
+	ContentFilterEnabled bool
+
+	// ContentFilterAction — что делать при срабатывании встроенного фильтра
+	// плохого контекста: "ban" (удалить и забанить) или "delete" (только
+	// удалить сообщение и, если не включён тихий режим, предупредить чат).
+	ContentFilterAction string
+
+	// ContentFilterAllowSubstrings — список разрешённых подстрок, которые
+	// исключаются из встроенного фильтра плохого контекста. Полезно для
+	// чатов со своими легитимными формулировками, похожими на спам.
+	ContentFilterAllowSubstrings []string
+
 	// CaptchaEnabled/CaptchaTimeout — проверка "не бот" для новых участников
 	// чата: сразу после вступления пользователь получает ограничение на
 	// отправку сообщений и кнопку "Я не бот"; не подтвердил за CaptchaTimeout
@@ -157,6 +173,23 @@ func Load(getenv Getenv) (*Config, error) {
 		return nil, fmt.Errorf("WARN_THRESHOLD должен быть не меньше 1, получено %d", warnThreshold)
 	}
 
+	contentFilterEnabled, err := boolEnv(getenv, "CONTENT_FILTER_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+
+	contentFilterAction := strings.ToLower(strings.TrimSpace(getenv("CONTENT_FILTER_ACTION")))
+	if contentFilterAction == "" {
+		contentFilterAction = "ban"
+	}
+	switch contentFilterAction {
+	case "ban", "delete":
+	default:
+		return nil, fmt.Errorf("CONTENT_FILTER_ACTION должен быть ban или delete, получено %q", contentFilterAction)
+	}
+
+	contentFilterAllowSubstrings := csvEnv(getenv, "CONTENT_FILTER_ALLOW_SUBSTRINGS")
+
 	captchaEnabled, err := boolEnv(getenv, "CAPTCHA_ENABLED", true)
 	if err != nil {
 		return nil, err
@@ -194,8 +227,11 @@ func Load(getenv Getenv) (*Config, error) {
 
 		ReportThreshold: reportThreshold,
 
-		SilentBan:     silentBan,
-		WarnThreshold: warnThreshold,
+		SilentBan:            silentBan,
+		WarnThreshold:        warnThreshold,
+		ContentFilterEnabled: contentFilterEnabled,
+		ContentFilterAction:  contentFilterAction,
+		ContentFilterAllowSubstrings: contentFilterAllowSubstrings,
 
 		CaptchaEnabled: captchaEnabled,
 		CaptchaTimeout: time.Duration(captchaTimeoutSec) * time.Second,
@@ -231,4 +267,26 @@ func boolEnv(getenv Getenv, key string, def bool) (bool, error) {
 		return false, fmt.Errorf("%s должен быть true/false, получено %q: %w", key, raw, err)
 	}
 	return v, nil
+}
+
+// csvEnv читает переменную окружения как список значений через запятую.
+// Пустые элементы игнорируются, пробелы по краям обрезаются.
+func csvEnv(getenv Getenv, key string) []string {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }

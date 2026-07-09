@@ -89,42 +89,43 @@ func main() {
 	var d *dispatcher.Dispatcher
 
 	defaultHandler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
-		if update.Message == nil {
+		msg := moderationMessageFromUpdate(update)
+		if msg == nil {
 			return
 		}
 
 		// Новые участники чата — капча, а не антифлуд-конвейер.
-		if cfg.CaptchaEnabled && len(update.Message.NewChatMembers) > 0 {
-			handleNewChatMembers(ctx, b, captchaManager, cfg, logger, update.Message.Chat.ID, update.Message.NewChatMembers)
+		if update.Message != nil && cfg.CaptchaEnabled && len(msg.NewChatMembers) > 0 {
+			handleNewChatMembers(ctx, b, captchaManager, cfg, logger, msg.Chat.ID, msg.NewChatMembers)
 			return
 		}
 
-		if update.Message.From == nil {
+		if msg.From == nil {
 			return
 		}
-		from := update.Message.From
+		from := msg.From
 		if from.IsBot {
 			return
 		}
 
-		if cfg.CaptchaEnabled && captchaManager.IsPending(update.Message.Chat.ID, from.ID) {
+		if cfg.CaptchaEnabled && captchaManager.IsPending(msg.Chat.ID, from.ID) {
 			// Ограничение прав в Telegram уже должно не пускать такие
 			// сообщения, но подчищаем на случай гонки/базовых групп, где
 			// ограничения соблюдаются не так строго, как в супергруппах.
 			_, _ = b.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
-				ChatID:    update.Message.Chat.ID,
-				MessageID: update.Message.ID,
+				ChatID:    msg.Chat.ID,
+				MessageID: msg.ID,
 			})
 			return
 		}
 
 		d.Submit(dispatcher.Update{
-			MessageID: update.Message.ID,
-			ChatID:    update.Message.Chat.ID,
+			MessageID: msg.ID,
+			ChatID:    msg.Chat.ID,
 			UserID:    from.ID,
 			Username:  from.Username,
-			Text:      update.Message.Text,
-			Timestamp: time.Unix(int64(update.Message.Date), 0),
+			Text:      messageModerationText(msg),
+			Timestamp: time.Unix(int64(msg.Date), 0),
 		})
 	}
 
@@ -161,7 +162,7 @@ func main() {
 		if update.Message == nil {
 			return
 		}
-		sendHelp(ctx, b, update.Message, cfg, mode, dbConnected, logger)
+		sendHelp(ctx, b, update.Message, cfg, store, mode, dbConnected, logger)
 	}
 
 	registerCommand(b, "start", helpHandler)
@@ -200,7 +201,7 @@ func main() {
 				logger.Warn("сообщение забанено по жалобам сообщества",
 					"chat_id", msg.Chat.ID, "message_id", target.ID,
 					"author_id", target.From.ID, "reports", count)
-				d.BanSpammer(ctx, msg.Chat.ID, target.ID, target.From.ID, target.From.Username, target.Text)
+				d.BanSpammer(ctx, msg.Chat.ID, target.ID, target.From.ID, target.From.Username, messageModerationText(target))
 				return
 			}
 
@@ -219,7 +220,19 @@ func main() {
 	// замыканию (как в defaultHandler) сработал бы и с nil на момент
 	// регистрации, но передача d обычным параметром функции — нет, это уже
 	// копия значения на момент вызова.
-	d = dispatcher.New(cfg.WorkerCount, cfg.QueueSize, limiter, b, store, cfg.SilentBan, cfg.WarnThreshold, logger)
+	d = dispatcher.New(
+		cfg.WorkerCount,
+		cfg.QueueSize,
+		limiter,
+		b,
+		store,
+		cfg.SilentBan,
+		cfg.WarnThreshold,
+		cfg.ContentFilterEnabled,
+		cfg.ContentFilterAction,
+		cfg.ContentFilterAllowSubstrings,
+		logger,
+	)
 	d.Start(ctx)
 
 	// /addspam, /removespam, /triggers, /blockdomain, /unblockdomain,
