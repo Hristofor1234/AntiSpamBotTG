@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -52,12 +53,15 @@ func NewAsyncHandler(botToken string, chatID int64, threadID int, source string,
 		defer n.wg.Done()
 		for msg := range n.queue {
 			ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-			_, _ = n.bot.SendMessage(ctx, &tgbot.SendMessageParams{
+			_, err := n.bot.SendMessage(ctx, &tgbot.SendMessageParams{
 				ChatID:          n.chatID,
 				MessageThreadID: n.threadID,
 				Text:            msg,
 			})
 			cancel()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "tglog send failed: chat_id=%d thread_id=%d error=%v\n", n.chatID, n.threadID, err)
+			}
 		}
 	}()
 
