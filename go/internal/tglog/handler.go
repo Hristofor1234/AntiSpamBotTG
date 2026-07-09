@@ -114,25 +114,138 @@ func (h *AsyncHandler) WithGroup(name string) slog.Handler {
 }
 
 func (h *AsyncHandler) format(r slog.Record) string {
-	var lines []string
-	lines = append(lines, fmt.Sprintf("ERROR LOG: %s", h.source))
-	lines = append(lines, fmt.Sprintf("time=%s", r.Time.UTC().Format(time.RFC3339)))
-	lines = append(lines, fmt.Sprintf("level=%s", r.Level.String()))
-	lines = append(lines, fmt.Sprintf("message=%s", r.Message))
-
-	for _, attr := range h.attrs {
-		lines = appendAttr(lines, h.groups, attr)
-	}
-	r.Attrs(func(attr slog.Attr) bool {
-		lines = appendAttr(lines, h.groups, attr)
-		return true
-	})
+	lines := humanizeRecord(h.source, r, h.attrs, h.groups)
 
 	msg := strings.Join(lines, "\n")
 	if len(msg) <= maxMessageLen {
 		return msg
 	}
 	return msg[:maxMessageLen-14] + "\n...truncated"
+}
+
+func humanizeRecord(source string, r slog.Record, baseAttrs []slog.Attr, groups []string) []string {
+	fields := collectFields(baseAttrs, groups)
+	r.Attrs(func(attr slog.Attr) bool {
+		for k, v := range collectFields([]slog.Attr{attr}, groups) {
+			fields[k] = v
+		}
+		return true
+	})
+
+	title, details := humanizeMessage(r.Message, fields)
+	lines := []string{
+		fmt.Sprintf("❌ %s | %s", source, title),
+	}
+	lines = append(lines, details...)
+	return lines
+}
+
+func humanizeMessage(message string, fields map[string]string) (string, []string) {
+	errorText := fields["error"]
+	combined := strings.ToLower(strings.TrimSpace(message + "\n" + errorText))
+
+	switch {
+	case strings.Contains(combined, "postgresql") || strings.Contains(combined, "database_url") || strings.Contains(combined, "failed sasl auth") || strings.Contains(combined, "sqlstate"):
+		title := "Проблема с базой данных"
+		details := []string{"Бот не смог подключиться к PostgreSQL."}
+		switch {
+		case strings.Contains(combined, "password authentication failed"):
+			details = append(details, "Причина: неверный логин или пароль к базе данных.")
+		case strings.Contains(combined, "connection refused"), strings.Contains(combined, "no route to host"), strings.Contains(combined, "i/o timeout"):
+			details = append(details, "Причина: база недоступна по сети или не запущена.")
+		case strings.Contains(combined, "не удалось подключиться"):
+			details = append(details, "Причина: соединение с базой данных не установилось.")
+		}
+		return title, details
+
+	case strings.Contains(combined, "telegram") && strings.Contains(combined, "429"):
+		return "Telegram ограничил запросы", []string{
+			"Бот уперся в лимиты Telegram.",
+			"Обычно это временно и проходит само.",
+		}
+
+	case strings.Contains(combined, "telegram"), strings.Contains(combined, "client timeout exceeded"), strings.Contains(combined, "context deadline exceeded"):
+		return "Проблема с Telegram или сетью", []string{
+			"Бот не смог достучаться до Telegram API.",
+			"Проверь интернет на сервере, если ошибка повторяется.",
+		}
+
+	case strings.Contains(combined, "queue_size"), strings.Contains(combined, "bot_token"), strings.Contains(combined, "rate_limit"), strings.Contains(combined, "content_filter"), strings.Contains(combined, "ошибка конфигурации"):
+		return "Ошибка в настройках бота", []string{
+			"Бот не смог прочитать `.env` или одну из переменных окружения.",
+			shortConfigReason(errorText, message),
+		}
+
+	case strings.Contains(combined, "chat not found"), strings.Contains(combined, "forbidden"):
+		return "Нет доступа к чату для логов", []string{
+			"Бот не может отправить сообщение в Telegram-чат для ошибок.",
+			"Проверь, что этот бот добавлен в нужную группу и может писать сообщения.",
+		}
+
+	default:
+		if message != "" {
+			return "Ошибка в работе бота", []string{shorten(message)}
+		}
+		return "Ошибка в работе бота", []string{"Подробности смотри в `docker compose logs -f bot`."}
+	}
+}
+
+func shortConfigReason(errorText, message string) string {
+	combined := strings.TrimSpace(errorText + " " + message)
+	switch {
+	case strings.Contains(combined, "QUEUE_SIZE"):
+		return "Причина: неправильно задана переменная `QUEUE_SIZE`."
+	case strings.Contains(combined, "BOT_TOKEN"):
+		return "Причина: не задан или неверно задан `BOT_TOKEN`."
+	case strings.Contains(combined, "DATABASE_URL"):
+		return "Причина: неправильно задан `DATABASE_URL`."
+	default:
+		return "Причина: одна из переменных окружения заполнена неверно."
+	}
+}
+
+func collectFields(attrs []slog.Attr, groups []string) map[string]string {
+	fields := make(map[string]string)
+	for _, attr := range attrs {
+		collectAttr(fields, groups, attr)
+	}
+	return fields
+}
+
+func collectAttr(fields map[string]string, groups []string, attr slog.Attr) {
+	attr.Value = attr.Value.Resolve()
+	if attr.Equal(slog.Attr{}) {
+		return
+	}
+
+	key := attr.Key
+	if len(groups) > 0 && key != "" {
+		key = strings.Join(append(append([]string(nil), groups...), key), ".")
+	}
+
+	if attr.Value.Kind() == slog.KindGroup {
+		nextGroups := append([]string(nil), groups...)
+		if attr.Key != "" {
+			nextGroups = append(nextGroups, attr.Key)
+		}
+		for _, nested := range attr.Value.Group() {
+			collectAttr(fields, nextGroups, nested)
+		}
+		return
+	}
+
+	fields[key] = valueString(attr.Value)
+}
+
+func shorten(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "Подробности смотри в логах контейнера."
+	}
+	if len(s) <= 220 {
+		return s
+	}
+	return s[:217] + "..."
 }
 
 func appendAttr(lines []string, groups []string, attr slog.Attr) []string {
