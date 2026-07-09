@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +40,11 @@ func main() {
 	// переменные приходят из окружения, и файла может не быть — это не ошибка.
 	_ = godotenv.Load()
 
+	if bootstrapLogger, closeBootstrapLogger := bootstrapTelegramErrorLogger(stdoutHandler); bootstrapLogger != nil {
+		logger = bootstrapLogger
+		defer closeBootstrapLogger()
+	}
+
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		logger.Error("ошибка конфигурации", "error", err)
@@ -45,22 +52,9 @@ func main() {
 	}
 
 	if cfg.ErrorLogChatID != 0 {
-		errorLogHandler, closeErrorLogHandler, err := tglog.NewAsyncHandler(
-			cfg.BotToken,
-			cfg.ErrorLogChatID,
-			cfg.ErrorLogMessageThreadID,
-			"AntiSpamBotTG",
-			slog.LevelError,
-		)
-		if err != nil {
-			logger.Error("не удалось включить отправку error-логов в Telegram", "error", err)
-		} else {
-			defer closeErrorLogHandler()
-			logger = slog.New(tglog.NewMultiHandler(stdoutHandler, errorLogHandler))
-			logger.Info("отправка error-логов в Telegram включена",
-				"chat_id", cfg.ErrorLogChatID,
-				"message_thread_id", cfg.ErrorLogMessageThreadID)
-		}
+		logger.Info("отправка error-логов в Telegram включена",
+			"chat_id", cfg.ErrorLogChatID,
+			"message_thread_id", cfg.ErrorLogMessageThreadID)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -277,4 +271,44 @@ func main() {
 
 	d.Wait()
 	logger.Info("бот остановлен")
+}
+
+func bootstrapTelegramErrorLogger(stdoutHandler slog.Handler) (*slog.Logger, func()) {
+	botToken := strings.TrimSpace(os.Getenv("BOT_TOKEN"))
+	if botToken == "" {
+		return nil, nil
+	}
+
+	chatIDRaw := strings.TrimSpace(os.Getenv("ERROR_LOG_CHAT_ID"))
+	if chatIDRaw == "" {
+		return nil, nil
+	}
+
+	chatID, err := strconv.ParseInt(chatIDRaw, 10, 64)
+	if err != nil {
+		return nil, nil
+	}
+
+	threadID := 0
+	threadIDRaw := strings.TrimSpace(os.Getenv("ERROR_LOG_MESSAGE_THREAD_ID"))
+	if threadIDRaw != "" {
+		parsedThreadID, err := strconv.Atoi(threadIDRaw)
+		if err != nil {
+			return nil, nil
+		}
+		threadID = parsedThreadID
+	}
+
+	errorLogHandler, closeErrorLogHandler, err := tglog.NewAsyncHandler(
+		botToken,
+		chatID,
+		threadID,
+		"AntiSpamBotTG",
+		slog.LevelError,
+	)
+	if err != nil {
+		return nil, nil
+	}
+
+	return slog.New(tglog.NewMultiHandler(stdoutHandler, errorLogHandler)), closeErrorLogHandler
 }
