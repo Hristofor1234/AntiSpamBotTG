@@ -299,12 +299,20 @@ func bootstrapTelegramErrorLogger(stdoutHandler slog.Handler) (*slog.Logger, fun
 		threadID = parsedThreadID
 	}
 
+	remindInterval := 30 * time.Minute
+	if reminderRaw := strings.TrimSpace(os.Getenv("ERROR_LOG_REMINDER_MINUTES")); reminderRaw != "" {
+		if minutes, err := strconv.Atoi(reminderRaw); err == nil && minutes > 0 {
+			remindInterval = time.Duration(minutes) * time.Minute
+		}
+	}
+
 	errorLogHandler, closeErrorLogHandler, err := tglog.NewAsyncHandler(
 		botToken,
 		chatID,
 		threadID,
 		"AntiSpamBotTG",
-		slog.LevelError,
+		slog.LevelInfo,
+		remindInterval,
 	)
 	if err != nil {
 		return nil, nil

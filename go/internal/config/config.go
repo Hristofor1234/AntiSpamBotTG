@@ -23,6 +23,10 @@ type Config struct {
 	// ErrorLogChatID.
 	ErrorLogMessageThreadID int
 
+	// ErrorLogReminderInterval — как часто повторять активную проблему в
+	// Telegram, если она всё ещё не решена.
+	ErrorLogReminderInterval time.Duration
+
 	// Антифлуд: не более RateLimitCount сообщений за RateLimitWindow.
 	RateLimitCount  int
 	RateLimitWindow time.Duration
@@ -118,6 +122,13 @@ func Load(getenv Getenv) (*Config, error) {
 	}
 	if errorLogMessageThreadID > 0 && errorLogChatID == 0 {
 		return nil, fmt.Errorf("ERROR_LOG_MESSAGE_THREAD_ID задан, но ERROR_LOG_CHAT_ID пуст")
+	}
+	errorLogReminderMin, err := intEnv(getenv, "ERROR_LOG_REMINDER_MINUTES", 30)
+	if err != nil {
+		return nil, err
+	}
+	if errorLogReminderMin <= 0 {
+		return nil, fmt.Errorf("ERROR_LOG_REMINDER_MINUTES должен быть положительным числом, получено %d", errorLogReminderMin)
 	}
 
 	rateLimitCount, err := intEnv(getenv, "RATE_LIMIT_COUNT", 5)
@@ -237,13 +248,14 @@ func Load(getenv Getenv) (*Config, error) {
 	}
 
 	return &Config{
-		BotToken:                token,
-		ErrorLogChatID:          errorLogChatID,
-		ErrorLogMessageThreadID: errorLogMessageThreadID,
-		RateLimitCount:          rateLimitCount,
-		RateLimitWindow:         time.Duration(rateLimitWindowSec) * time.Second,
-		WorkerCount:             workerCount,
-		QueueSize:               queueSize,
+		BotToken:                 token,
+		ErrorLogChatID:           errorLogChatID,
+		ErrorLogMessageThreadID:  errorLogMessageThreadID,
+		ErrorLogReminderInterval: time.Duration(errorLogReminderMin) * time.Minute,
+		RateLimitCount:           rateLimitCount,
+		RateLimitWindow:          time.Duration(rateLimitWindowSec) * time.Second,
+		WorkerCount:              workerCount,
+		QueueSize:                queueSize,
 
 		WebhookURL:         webhookURL,
 		WebhookSecretToken: webhookSecretToken,

@@ -10,24 +10,8 @@ import (
 func TestFormatIncludesMessageAndAttrs(t *testing.T) {
 	t.Parallel()
 
-	h := &AsyncHandler{
-		minLevel: slog.LevelError,
-		source:   "AntiSpamBotTG",
-		attrs: []slog.Attr{
-			slog.String("service", "bot"),
-		},
-	}
-
 	record := slog.NewRecord(time.Date(2026, 7, 9, 7, 0, 0, 0, time.UTC), slog.LevelError, "ошибка подключения", 0)
-	record.AddAttrs(
-		slog.Int64("chat_id", -100123),
-		slog.Group("error",
-			slog.String("kind", "telegram"),
-			slog.String("detail", "timeout"),
-		),
-	)
-
-	msg := h.format(record)
+	msg := formatAlert("AntiSpamBotTG", "Ошибка в работе бота", []string{record.Message})
 
 	for _, want := range []string{
 		"❌ AntiSpamBotTG | Ошибка в работе бота",
@@ -42,15 +26,16 @@ func TestFormatIncludesMessageAndAttrs(t *testing.T) {
 func TestFormatHumanizesDatabaseError(t *testing.T) {
 	t.Parallel()
 
-	h := &AsyncHandler{
-		minLevel: slog.LevelError,
-		source:   "AntiSpamBotTG",
+	event := classifyErrorEvent(
+		"не удалось подключиться к PostgreSQL, глобальное обучение отключено",
+		map[string]string{
+			"error": `PostgreSQL недоступен после 6 попыток: failed SASL auth: FATAL: password authentication failed for user "bad"`,
+		},
+	)
+	if event == nil {
+		t.Fatal("classifyErrorEvent() returned nil")
 	}
-
-	record := slog.NewRecord(time.Date(2026, 7, 9, 13, 0, 0, 0, time.UTC), slog.LevelError, "не удалось подключиться к PostgreSQL, глобальное обучение отключено", 0)
-	record.AddAttrs(slog.String("error", `PostgreSQL недоступен после 6 попыток: failed SASL auth: FATAL: password authentication failed for user "bad"`))
-
-	msg := h.format(record)
+	msg := formatAlert("AntiSpamBotTG", event.title, event.details)
 
 	for _, want := range []string{
 		"❌ AntiSpamBotTG | Проблема с базой данных",
@@ -60,5 +45,20 @@ func TestFormatHumanizesDatabaseError(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("formatted message %q does not contain %q", msg, want)
 		}
+	}
+}
+
+func TestClassifyRecoveryEvent(t *testing.T) {
+	t.Parallel()
+
+	event := classifyRecoveryEvent("подключение к PostgreSQL установлено, глобальное обучение включено")
+	if event == nil {
+		t.Fatal("classifyRecoveryEvent() returned nil")
+	}
+	if event.key != "database" {
+		t.Fatalf("event.key = %q, want database", event.key)
+	}
+	if !strings.Contains(formatResolved("AntiSpamBotTG", event.title, event.details), "Подключение к PostgreSQL восстановлено.") {
+		t.Fatal("resolved message does not contain recovery text")
 	}
 }

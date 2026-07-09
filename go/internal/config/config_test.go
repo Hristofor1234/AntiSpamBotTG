@@ -115,6 +115,9 @@ func TestLoadErrorLogConfig(t *testing.T) {
 		if cfg.ErrorLogMessageThreadID != 42 {
 			t.Fatalf("ErrorLogMessageThreadID = %d, want 42", cfg.ErrorLogMessageThreadID)
 		}
+		if cfg.ErrorLogReminderInterval <= 0 {
+			t.Fatalf("ErrorLogReminderInterval = %v, want positive", cfg.ErrorLogReminderInterval)
+		}
 	})
 
 	t.Run("reject thread without chat", func(t *testing.T) {
@@ -122,6 +125,17 @@ func TestLoadErrorLogConfig(t *testing.T) {
 
 		_, err := Load(base(map[string]string{
 			"ERROR_LOG_MESSAGE_THREAD_ID": "42",
+		}))
+		if err == nil {
+			t.Fatal("Load() error = nil, want validation error")
+		}
+	})
+
+	t.Run("reject non-positive reminder interval", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := Load(base(map[string]string{
+			"ERROR_LOG_REMINDER_MINUTES": "0",
 		}))
 		if err == nil {
 			t.Fatal("Load() error = nil, want validation error")
