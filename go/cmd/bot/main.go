@@ -20,6 +20,7 @@ import (
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/ratelimit"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/reports"
 	"github.com/Hristofor1234/AntiSpamBotTG/internal/storage"
+	"github.com/Hristofor1234/AntiSpamBotTG/internal/tglog"
 )
 
 // dbInitTimeout — сколько ждём подключения к PostgreSQL при старте
@@ -28,9 +29,10 @@ import (
 const dbInitTimeout = 30 * time.Second
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	stdoutHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	}))
+	})
+	logger := slog.New(stdoutHandler)
 
 	// .env нужен только для локального запуска без Docker; в контейнере
 	// переменные приходят из окружения, и файла может не быть — это не ошибка.
@@ -40,6 +42,25 @@ func main() {
 	if err != nil {
 		logger.Error("ошибка конфигурации", "error", err)
 		os.Exit(1)
+	}
+
+	if cfg.ErrorLogChatID != 0 {
+		errorLogHandler, closeErrorLogHandler, err := tglog.NewAsyncHandler(
+			cfg.BotToken,
+			cfg.ErrorLogChatID,
+			cfg.ErrorLogMessageThreadID,
+			"AntiSpamBotTG",
+			slog.LevelError,
+		)
+		if err != nil {
+			logger.Error("не удалось включить отправку error-логов в Telegram", "error", err)
+		} else {
+			defer closeErrorLogHandler()
+			logger = slog.New(tglog.NewMultiHandler(stdoutHandler, errorLogHandler))
+			logger.Info("отправка error-логов в Telegram включена",
+				"chat_id", cfg.ErrorLogChatID,
+				"message_thread_id", cfg.ErrorLogMessageThreadID)
+		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

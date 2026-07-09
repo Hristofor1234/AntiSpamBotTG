@@ -13,6 +13,16 @@ import (
 type Config struct {
 	BotToken string
 
+	// ErrorLogChatID — id Telegram-чата, куда бот будет дублировать свои
+	// error-логи. 0 отключает отправку. Для форум-групп можно дополнительно
+	// указать ErrorLogMessageThreadID и слать в конкретную тему.
+	ErrorLogChatID int64
+
+	// ErrorLogMessageThreadID — id темы (message_thread_id) внутри
+	// форум-группы для отправки error-логов. Используется только вместе с
+	// ErrorLogChatID.
+	ErrorLogMessageThreadID int
+
 	// Антифлуд: не более RateLimitCount сообщений за RateLimitWindow.
 	RateLimitCount  int
 	RateLimitWindow time.Duration
@@ -93,6 +103,21 @@ func Load(getenv Getenv) (*Config, error) {
 	token := strings.TrimSpace(getenv("BOT_TOKEN"))
 	if token == "" {
 		return nil, fmt.Errorf("не задана обязательная переменная окружения: BOT_TOKEN")
+	}
+
+	errorLogChatID, err := int64Env(getenv, "ERROR_LOG_CHAT_ID", 0)
+	if err != nil {
+		return nil, err
+	}
+	errorLogMessageThreadID, err := intEnv(getenv, "ERROR_LOG_MESSAGE_THREAD_ID", 0)
+	if err != nil {
+		return nil, err
+	}
+	if errorLogMessageThreadID < 0 {
+		return nil, fmt.Errorf("ERROR_LOG_MESSAGE_THREAD_ID не может быть отрицательным, получено %d", errorLogMessageThreadID)
+	}
+	if errorLogMessageThreadID > 0 && errorLogChatID == 0 {
+		return nil, fmt.Errorf("ERROR_LOG_MESSAGE_THREAD_ID задан, но ERROR_LOG_CHAT_ID пуст")
 	}
 
 	rateLimitCount, err := intEnv(getenv, "RATE_LIMIT_COUNT", 5)
@@ -212,11 +237,13 @@ func Load(getenv Getenv) (*Config, error) {
 	}
 
 	return &Config{
-		BotToken:        token,
-		RateLimitCount:  rateLimitCount,
-		RateLimitWindow: time.Duration(rateLimitWindowSec) * time.Second,
-		WorkerCount:     workerCount,
-		QueueSize:       queueSize,
+		BotToken:                token,
+		ErrorLogChatID:          errorLogChatID,
+		ErrorLogMessageThreadID: errorLogMessageThreadID,
+		RateLimitCount:          rateLimitCount,
+		RateLimitWindow:         time.Duration(rateLimitWindowSec) * time.Second,
+		WorkerCount:             workerCount,
+		QueueSize:               queueSize,
 
 		WebhookURL:         webhookURL,
 		WebhookSecretToken: webhookSecretToken,
@@ -227,10 +254,10 @@ func Load(getenv Getenv) (*Config, error) {
 
 		ReportThreshold: reportThreshold,
 
-		SilentBan:            silentBan,
-		WarnThreshold:        warnThreshold,
-		ContentFilterEnabled: contentFilterEnabled,
-		ContentFilterAction:  contentFilterAction,
+		SilentBan:                    silentBan,
+		WarnThreshold:                warnThreshold,
+		ContentFilterEnabled:         contentFilterEnabled,
+		ContentFilterAction:          contentFilterAction,
 		ContentFilterAllowSubstrings: contentFilterAllowSubstrings,
 
 		CaptchaEnabled: captchaEnabled,
@@ -249,6 +276,21 @@ func intEnv(getenv Getenv, key string, def int) (int, error) {
 		return def, nil
 	}
 	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s должен быть целым числом, получено %q: %w", key, raw, err)
+	}
+	return v, nil
+}
+
+// int64Env читает переменную окружения как int64; если она не задана —
+// возвращает def. Ошибка возвращается только если значение задано, но
+// не является числом.
+func int64Env(getenv Getenv, key string, def int64) (int64, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s должен быть целым числом, получено %q: %w", key, raw, err)
 	}

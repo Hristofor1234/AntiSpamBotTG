@@ -68,3 +68,63 @@ func TestLoadContentFilterAction(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadErrorLogConfig(t *testing.T) {
+	t.Parallel()
+
+	base := func(extra map[string]string) Getenv {
+		values := map[string]string{
+			"BOT_TOKEN": "token",
+		}
+		for k, v := range extra {
+			values[k] = v
+		}
+		return func(key string) string {
+			return values[key]
+		}
+	}
+
+	t.Run("disabled by default", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, err := Load(base(nil))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.ErrorLogChatID != 0 {
+			t.Fatalf("ErrorLogChatID = %d, want 0", cfg.ErrorLogChatID)
+		}
+		if cfg.ErrorLogMessageThreadID != 0 {
+			t.Fatalf("ErrorLogMessageThreadID = %d, want 0", cfg.ErrorLogMessageThreadID)
+		}
+	})
+
+	t.Run("accept chat and thread ids", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, err := Load(base(map[string]string{
+			"ERROR_LOG_CHAT_ID":           "-1001234567890",
+			"ERROR_LOG_MESSAGE_THREAD_ID": "42",
+		}))
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.ErrorLogChatID != -1001234567890 {
+			t.Fatalf("ErrorLogChatID = %d, want -1001234567890", cfg.ErrorLogChatID)
+		}
+		if cfg.ErrorLogMessageThreadID != 42 {
+			t.Fatalf("ErrorLogMessageThreadID = %d, want 42", cfg.ErrorLogMessageThreadID)
+		}
+	})
+
+	t.Run("reject thread without chat", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := Load(base(map[string]string{
+			"ERROR_LOG_MESSAGE_THREAD_ID": "42",
+		}))
+		if err == nil {
+			t.Fatal("Load() error = nil, want validation error")
+		}
+	})
+}
