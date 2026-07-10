@@ -31,6 +31,10 @@ import (
 const dbInitTimeout = 30 * time.Second
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	stdoutHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})
@@ -48,7 +52,7 @@ func main() {
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		logger.Error("ошибка конфигурации", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.ErrorLogChatID != 0 {
@@ -156,7 +160,7 @@ func main() {
 	b, err := tgbot.New(cfg.BotToken, opts...)
 	if err != nil {
 		logger.Error("ошибка инициализации бота", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Подсказки команд при вводе "/" в Telegram — отдельный список для групп
@@ -271,6 +275,7 @@ func main() {
 
 	d.Wait()
 	logger.Info("бот остановлен")
+	return 0
 }
 
 func bootstrapTelegramErrorLogger(stdoutHandler slog.Handler) (*slog.Logger, func()) {

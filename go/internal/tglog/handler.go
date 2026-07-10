@@ -24,11 +24,15 @@ type AsyncHandler struct {
 	notifier       *notifier
 	remindInterval time.Duration
 
-	mu        sync.Mutex
-	incidents map[string]*incidentState
+	state *incidentRegistry
 
 	attrs  []slog.Attr
 	groups []string
+}
+
+type incidentRegistry struct {
+	mu        sync.Mutex
+	incidents map[string]*incidentState
 }
 
 type notifier struct {
@@ -97,7 +101,9 @@ func NewAsyncHandler(botToken string, chatID int64, threadID int, source string,
 		source:         source,
 		notifier:       n,
 		remindInterval: remindInterval,
-		incidents:      make(map[string]*incidentState),
+		state: &incidentRegistry{
+			incidents: make(map[string]*incidentState),
+		},
 	}
 
 	if remindInterval > 0 {
@@ -158,7 +164,7 @@ func (h *AsyncHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		source:         h.source,
 		notifier:       h.notifier,
 		remindInterval: h.remindInterval,
-		incidents:      h.incidents,
+		state:          h.state,
 		attrs:          append(append([]slog.Attr(nil), h.attrs...), attrs...),
 		groups:         append([]string(nil), h.groups...),
 	}
@@ -171,7 +177,7 @@ func (h *AsyncHandler) WithGroup(name string) slog.Handler {
 		source:         h.source,
 		notifier:       h.notifier,
 		remindInterval: h.remindInterval,
-		incidents:      h.incidents,
+		state:          h.state,
 		attrs:          append([]slog.Attr(nil), h.attrs...),
 		groups:         append(append([]string(nil), h.groups...), name),
 	}
@@ -186,15 +192,15 @@ func (h *AsyncHandler) sendDueReminders() {
 	now := time.Now()
 	var due []incidentState
 
-	h.mu.Lock()
-	for _, state := range h.incidents {
+	h.state.mu.Lock()
+	for _, state := range h.state.incidents {
 		if !state.active || now.Sub(state.lastSent) < h.remindInterval {
 			continue
 		}
 		state.lastSent = now
 		due = append(due, *state)
 	}
-	h.mu.Unlock()
+	h.state.mu.Unlock()
 
 	for _, state := range due {
 		h.enqueue(formatReminder(h.source, state.title, state.details))
@@ -204,36 +210,36 @@ func (h *AsyncHandler) sendDueReminders() {
 func (h *AsyncHandler) upsertIncident(event incidentEvent) {
 	now := time.Now()
 
-	h.mu.Lock()
-	state, exists := h.incidents[event.key]
+	h.state.mu.Lock()
+	state, exists := h.state.incidents[event.key]
 	if exists && state.active {
 		state.title = event.title
 		state.details = append([]string(nil), event.details...)
-		h.mu.Unlock()
+		h.state.mu.Unlock()
 		return
 	}
 
-	h.incidents[event.key] = &incidentState{
+	h.state.incidents[event.key] = &incidentState{
 		key:      event.key,
 		title:    event.title,
 		details:  append([]string(nil), event.details...),
 		lastSent: now,
 		active:   true,
 	}
-	h.mu.Unlock()
+	h.state.mu.Unlock()
 
 	h.enqueue(formatAlert(h.source, event.title, event.details))
 }
 
 func (h *AsyncHandler) resolveIncident(event incidentEvent) {
-	h.mu.Lock()
-	state, exists := h.incidents[event.key]
+	h.state.mu.Lock()
+	state, exists := h.state.incidents[event.key]
 	if !exists || !state.active {
-		h.mu.Unlock()
+		h.state.mu.Unlock()
 		return
 	}
 	state.active = false
-	h.mu.Unlock()
+	h.state.mu.Unlock()
 
 	h.enqueue(formatResolved(h.source, event.title, event.details))
 }
